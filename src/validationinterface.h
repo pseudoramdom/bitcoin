@@ -133,6 +133,20 @@ protected:
      */
     virtual void BlockDisconnected(const std::shared_ptr<const CBlock> &block, const CBlockIndex* pindex) {}
     /**
+     * Notifies listeners that a header or block was accepted which, at that
+     * time, was not on the active chain and had no more work than the active
+     * tip. Listeners must re-check, as the chain may have changed since.
+     *
+     * Headers accepted in one ProcessNewBlockHeaders() call are coalesced
+     * into one notification for the last new header, also if a later header
+     * in the batch is rejected. Known headers are not notified again.
+     * A block is notified again when its data is stored, so `pindex` is
+     * not necessarily a leaf of the block tree.
+     *
+     * Called on a background thread.
+     */
+    virtual void AcceptedStaleTip(const CBlockIndex* pindex) {}
+    /**
      * Notifies listeners of the new active block chain on-disk.
      *
      * Prior to this callback, any updates are not guaranteed to persist on disk
@@ -228,6 +242,7 @@ public:
     void MempoolTransactionsRemovedForBlock(std::shared_ptr<const CBlock>, std::vector<RemovedMempoolTransactionInfo>, unsigned int block_height);
     void BlockConnected(const kernel::ChainstateRole&, std::shared_ptr<const CBlock>, const CBlockIndex* pindex);
     void BlockDisconnected(std::shared_ptr<const CBlock>, const CBlockIndex* pindex);
+    void AcceptedStaleTip(const CBlockIndex* pindex);
     void ChainStateFlushed(const kernel::ChainstateRole&, const CBlockLocator&);
     void BlockChecked(const std::shared_ptr<const CBlock>&, const BlockValidationState&);
     void NewPoWValidBlock(const CBlockIndex *, const std::shared_ptr<const CBlock>&);
