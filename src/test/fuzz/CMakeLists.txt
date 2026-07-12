@@ -123,6 +123,7 @@ add_executable(fuzz
   signet.cpp
   socks5.cpp
   span.cpp
+  staletip_message.cpp
   string.cpp
   strprintf.cpp
   system.cpp

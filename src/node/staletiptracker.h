@@ -8,16 +8,12 @@
 #include <arith_uint256.h>
 #include <chain.h>
 #include <kernel/cs_main.h>
+#include <staletipmessage.h>
 #include <util/chaintype.h>
 
 #include <cstddef>
 #include <optional>
 #include <vector>
-
-/** Maximum number of blocks a tracked stale branch may have after its fork
- *  point, unless StaleTipTracker is constructed with another limit. From
- *  BIP 332. */
-inline constexpr size_t MAX_STALETIP_HEADERS{20};
 
 namespace node {
 class BlockManager;
@@ -38,6 +34,10 @@ struct StaleFork {
     //! Tip of the stale branch. Never null.
     const CBlockIndex* tip;
 };
+
+/** Build the `staletip` message announcing `fork`, compressing the headers
+ *  between `fork.fork_point` (exclusive) and `fork.tip` (inclusive). */
+StaleTipMessage MakeStaleTipMessage(const StaleFork& fork, bool have_block) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 
 /** Tracker of recently seen stale tips: tips of valid (or potentially valid)
  *  branches of the block tree that are not part of the active chain.

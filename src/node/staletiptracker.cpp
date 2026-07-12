@@ -42,6 +42,32 @@ bool IsVariantOnBranch(const CBlockIndex& block, const CBlockIndex& branch_tip)
 
 } // namespace
 
+StaleTipMessage MakeStaleTipMessage(const StaleFork& fork, bool have_block)
+{
+    AssertLockHeld(::cs_main);
+    const CBlockIndex& tip{*fork.tip};
+    Assert(HasAncestor(tip, *fork.fork_point));
+
+    const int fork_length{tip.nHeight - fork.fork_point->nHeight};
+    Assert(fork_length > 0);
+    Assert(static_cast<size_t>(fork_length) <= MAX_STALETIP_HEADERS);
+
+    StaleTipMessage msg{.fork_point = fork.fork_point->GetBlockHash(), .have_block = have_block};
+    const CBlockIndex* pindex{&tip};
+    msg.headers.resize(fork_length);
+    for (int i{fork_length - 1}; i >= 0; --i) {
+        msg.headers.at(i) = {
+            .version = pindex->nVersion,
+            .merkle_root = pindex->hashMerkleRoot,
+            .time = pindex->nTime,
+            .bits = pindex->nBits,
+            .nonce = pindex->nNonce,
+        };
+        pindex = pindex->pprev;
+    }
+    return msg;
+}
+
 StaleTipTracker::StaleTipTracker(ChainType chain_type, int recent_window, size_t max_headers)
     : m_require_validated_block{chain_type == ChainType::SIGNET},
       m_dedup_header_variants{chain_type == ChainType::SIGNET},
