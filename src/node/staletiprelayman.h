@@ -15,6 +15,7 @@
 #include <deque>
 #include <functional>
 #include <map>
+#include <optional>
 #include <set>
 #include <vector>
 
@@ -55,7 +56,6 @@ class StaleTipRelayManager
 {
 public:
     using PeerHasHeaderFn = std::function<bool(const CBlockIndex&)>;
-    using CanServeBranchFn = std::function<bool(const StaleFork&)>;
 
     explicit StaleTipRelayManager(const StaleTipRelayOptions& opts);
 
@@ -91,15 +91,17 @@ public:
      * A tip is not announced twice, nor back to a peer that announced it to
      * us, nor to a peer that lacks its fork point or already has the tip.
      *
-     * @param[in] peer_has_header  Whether the peer is known to have a header.
-     * @param[in] can_serve_branch Whether we can serve every block on a stale
-     *                             branch.
+     * @param[in] max_serve_depth How far below our active tip we serve blocks
+     *                            to the peer, if limited.
+     * @param[in] peer_has_header Whether the peer is known to have a header.
      */
     std::vector<StaleTipMessage> GetStaleTipsToAnnounce(
-        NodeId peer, const CChain& chain,
-        const PeerHasHeaderFn& peer_has_header,
-        const CanServeBranchFn& can_serve_branch) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+        NodeId peer, const CChain& chain, std::optional<int> max_serve_depth,
+        const PeerHasHeaderFn& peer_has_header) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 
+    /** Whether `block` is stored on a tracked, still-eligible stale branch and
+     *  may be served to a peer that negotiated stale-tip relay. */
+    bool CanServeStaleBranchBlock(const CChain& chain, const CBlockIndex& block) const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
     /** Get the tracked tips that are eligible for relay, with their fork
      *  points, in the order they were added. */
     std::vector<StaleFork> GetStaleTips(const CChain& chain) const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);

@@ -18,6 +18,7 @@
 
 #include <cstddef>
 #include <initializer_list>
+#include <optional>
 #include <vector>
 
 BOOST_FIXTURE_TEST_SUITE(staletiprelayman_tests, BasicTestingSetup)
@@ -37,12 +38,11 @@ struct TestPeer {
 };
 
 std::vector<StaleTipMessage> Announce(node::StaleTipRelayManager& manager, const CChain& chain, const TestPeer& peer,
-                                               bool can_serve = false) EXCLUSIVE_LOCKS_REQUIRED(::cs_main)
+                                               std::optional<int> max_serve_depth = std::nullopt) EXCLUSIVE_LOCKS_REQUIRED(::cs_main)
 {
     return manager.GetStaleTipsToAnnounce(
-        peer.id, chain,
-        [&](const CBlockIndex& block) { return peer.HasHeader(block); },
-        [&](const StaleFork&) { return can_serve; });
+        peer.id, chain, max_serve_depth,
+        [&](const CBlockIndex& block) { return peer.HasHeader(block); });
 }
 
 std::vector<uint256> Tips(const std::vector<StaleTipMessage>& announcements)
@@ -172,8 +172,9 @@ BOOST_AUTO_TEST_CASE(signet_announces_with_block)
     BOOST_CHECK(manager.AcceptedStaleTip(tree.active_chain, *tip));
 
     // A signet tip is only announced once its blocks can be served.
-    BOOST_CHECK(Announce(manager, tree.active_chain, peer, /*can_serve=*/false).empty());
-    const auto announcements{Announce(manager, tree.active_chain, peer, /*can_serve=*/true)};
+    BOOST_CHECK(Announce(manager, tree.active_chain, peer).empty());
+    tip->m_chain_tx_count = 1;
+    const auto announcements{Announce(manager, tree.active_chain, peer)};
     BOOST_REQUIRE_EQUAL(announcements.size(), 1U);
     BOOST_CHECK(announcements.front().m_have_block);
     manager.DisconnectedPeer(peer.id);
@@ -211,6 +212,39 @@ BOOST_AUTO_TEST_CASE(announced_branch_blocks)
     manager.DisconnectedPeer(0);
     manager.DisconnectedPeer(1);
     BOOST_CHECK(!manager.IsAnnouncedStaleBranchBlock(0, *tip));
+}
+
+BOOST_AUTO_TEST_CASE(announces_servable_branches)
+{
+    LOCK(::cs_main);
+
+    BlockTree tree;
+    CBlockIndex* active{tree.Add(nullptr, true, true)};
+    for (int i{0}; i < 5; ++i) active = tree.Add(active, true, true);
+    CBlockIndex* first{tree.Add(active->GetAncestor(2), false, true)};
+    CBlockIndex* tip{tree.Add(first, false, true)};
+
+    node::StaleTipRelayManager manager{{}};
+    BOOST_CHECK(manager.AcceptedStaleTip(tree.active_chain, *tip));
+    NodeId next_id{0};
+    const auto have_block{[&](std::optional<int> max_serve_depth) EXCLUSIVE_LOCKS_REQUIRED(::cs_main) {
+        const TestPeer peer{.id = next_id++, .best_known = active};
+        manager.ConnectedPeer(peer.id);
+        const auto announcements{Announce(manager, tree.active_chain, peer, max_serve_depth)};
+        BOOST_REQUIRE_EQUAL(announcements.size(), 1U);
+        return announcements.front().m_have_block;
+    }};
+
+    // The tip's block is not enough: every block on the branch must be
+    // available...
+    BOOST_CHECK(!have_block(std::nullopt));
+    tip->m_chain_tx_count = 1;
+    BOOST_CHECK(have_block(std::nullopt));
+
+    // ...and shallow enough to serve to the peer.
+    const int first_depth{tree.active_chain.Height() - first->nHeight};
+    BOOST_CHECK(have_block(first_depth));
+    BOOST_CHECK(!have_block(first_depth - 1));
 }
 
 BOOST_AUTO_TEST_SUITE_END()

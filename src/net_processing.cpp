@@ -866,8 +866,6 @@ private:
 
     /** Send `staletip` messages for any new stale tips. */
     void MaybeSendStaleTips(CNode& node, Peer& peer, CNodeState& state) EXCLUSIVE_LOCKS_REQUIRED(g_msgproc_mutex, cs_main);
-    /** Whether we can serve every block on a stale branch to this peer. */
-    bool CanServeStaleBranch(const CNode& node, const Peer& peer, const StaleFork& fork) EXCLUSIVE_LOCKS_REQUIRED(g_msgproc_mutex, cs_main);
 
     void ProcessStaleTip(CNode& pfrom, Peer& peer, DataStream& vRecv) EXCLUSIVE_LOCKS_REQUIRED(g_msgproc_mutex);
 
@@ -1163,6 +1161,8 @@ private:
      * about and we fully-validated them at some point.
      */
     bool BlockRequestAllowed(const CBlockIndex& block_index) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+    /** Whether this negotiated peer may fetch an unvalidated tracked stale-tip branch block. */
+    bool StaleTipBlockRequestAllowed(const Peer& peer, const CBlockIndex& block_index) EXCLUSIVE_LOCKS_REQUIRED(g_msgproc_mutex, cs_main);
     /** How far below our active tip we serve blocks to this peer, or
      *  std::nullopt if there is no limit. Limited when we only signal
      *  NODE_NETWORK_LIMITED, as serving deeper blocks would leak our prune
@@ -2170,6 +2170,14 @@ bool PeerManagerImpl::BlockRequestAllowed(const CBlockIndex& block_index)
            (GetBlockProofEquivalentTime(*m_chainman.m_best_header, block_index, *m_chainman.m_best_header, m_chainparams.GetConsensus()) < STALE_RELAY_AGE_LIMIT);
 }
 
+bool PeerManagerImpl::StaleTipBlockRequestAllowed(const Peer& peer, const CBlockIndex& block_index)
+{
+    AssertLockHeld(g_msgproc_mutex);
+    AssertLockHeld(cs_main);
+    return NegotiatedStaleTip(peer) &&
+           m_stale_tip_relay->CanServeStaleBranchBlock(m_chainman.ActiveChain(), block_index);
+}
+
 std::optional<int> PeerManagerImpl::LimitedServingDepth(const CNode& node, const Peer& peer) const
 {
     if (node.HasPermission(NetPermissionFlags::NoBan)) return std::nullopt;
@@ -2734,7 +2742,7 @@ void PeerManagerImpl::ProcessGetBlockData(CNode& pfrom, Peer& peer, const CInv& 
         if (!pindex) {
             return;
         }
-        if (!BlockRequestAllowed(*pindex)) {
+        if (!BlockRequestAllowed(*pindex) && !StaleTipBlockRequestAllowed(peer, *pindex)) {
             LogDebug(BCLog::NET, "%s: ignoring request from peer=%i for old block that isn't in the main chain\n", __func__, pfrom.GetId());
             return;
         }
@@ -6010,14 +6018,6 @@ void PeerManagerImpl::MaybeSendFeefilter(CNode& pto, Peer& peer, std::chrono::mi
     }
 }
 
-bool PeerManagerImpl::CanServeStaleBranch(const CNode& node, const Peer& peer, const StaleFork& fork)
-{
-    AssertLockHeld(g_msgproc_mutex);
-    AssertLockHeld(cs_main);
-    const CBlockIndex& stale_tip{fork.tip.get()};
-    return (stale_tip.nStatus & BLOCK_HAVE_DATA) != 0 && BlockRequestAllowed(stale_tip);
-}
-
 void PeerManagerImpl::MaybeSendStaleTips(CNode& node, Peer& peer, CNodeState& state)
 {
     AssertLockHeld(g_msgproc_mutex);
@@ -6030,9 +6030,8 @@ void PeerManagerImpl::MaybeSendStaleTips(CNode& node, Peer& peer, CNodeState& st
     ProcessBlockAvailability(node.GetId());
 
     const auto announcements{m_stale_tip_relay->GetStaleTipsToAnnounce(
-        node.GetId(), m_chainman.ActiveChain(),
-        /*peer_has_header=*/[&](const CBlockIndex& block) EXCLUSIVE_LOCKS_REQUIRED(::cs_main) { return PeerHasHeader(&state, &block); },
-        /*can_serve_branch=*/[&](const StaleFork& fork) EXCLUSIVE_LOCKS_REQUIRED(g_msgproc_mutex, ::cs_main) { return CanServeStaleBranch(node, peer, fork); })};
+        node.GetId(), m_chainman.ActiveChain(), LimitedServingDepth(node, peer),
+        /*peer_has_header=*/[&](const CBlockIndex& block) EXCLUSIVE_LOCKS_REQUIRED(::cs_main) { return PeerHasHeader(&state, &block); })};
     for (const StaleTipMessage& data : announcements) {
         MakeAndPushMessage(node, NetMsgType::STALETIP, data);
         LogDebug(BCLog::NET, "sending staletip with %u header(s) to peer=%d", data.m_headers.size(), node.GetId());
