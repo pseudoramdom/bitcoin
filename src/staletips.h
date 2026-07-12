@@ -256,6 +256,9 @@ public:
      *         data availability.
      */
     bool AddStaleTip(const CChain& chain, const CBlockIndex* stale_tip, bool allow_more_work = false) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    /** Whether `block` is stored on a tracked, still-eligible stale branch and
+     *  may be served to a peer that negotiated stale-tip relay. */
+    bool CanServeStaleBranchBlock(const CChain& chain, const CBlockIndex* block) const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
     /** Get the tracked tips that are eligible for relay, with their fork points. */
     std::vector<StaleFork> GetStaleTips(const CChain& chain) const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
     /** Get the tracked tips that are eligible for relay, in the order they
