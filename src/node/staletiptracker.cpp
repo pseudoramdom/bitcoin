@@ -182,6 +182,21 @@ bool StaleTipTracker::AddStaleTip(const CChain& active_chain, const CBlockIndex&
     return Add(stale_tip);
 }
 
+bool StaleTipTracker::CanServeStaleBranchBlock(const CChain& active_chain, const CBlockIndex& block) const
+{
+    AssertLockHeld(::cs_main);
+    if (!(block.nStatus & BLOCK_HAVE_DATA)) return false;
+
+    for (const CBlockIndex* tip : m_tips) {
+        if (!(tip->nStatus & BLOCK_HAVE_DATA)) continue;
+
+        const CBlockIndex* fork_point{GetEligibleForkPoint(active_chain, *tip)};
+        if (fork_point == nullptr) continue;
+        if (block.nHeight > fork_point->nHeight && HasAncestor(*tip, block)) return true;
+    }
+    return false;
+}
+
 std::vector<StaleFork> StaleTipTracker::GetStaleTips(const CChain& active_chain) const
 {
     AssertLockHeld(::cs_main);
