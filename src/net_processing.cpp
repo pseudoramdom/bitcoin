@@ -1184,6 +1184,8 @@ private:
      * about and we fully-validated them at some point.
      */
     bool BlockRequestAllowed(const CBlockIndex& block_index) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+    /** Whether this negotiated peer may fetch a tracked stale branch block. */
+    bool StaleTipBlockRequestAllowed(const Peer& peer, const CBlockIndex& block_index) EXCLUSIVE_LOCKS_REQUIRED(g_msgproc_mutex, cs_main);
     /** Whether a block is too deep to serve to this peer, because we only
      *  signal NODE_NETWORK_LIMITED and serving it would leak our prune height. */
     bool BelowLimitedServingThreshold(const CNode& node, const Peer& peer, const CBlockIndex& block_index) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
@@ -2187,6 +2189,14 @@ bool PeerManagerImpl::BlockRequestAllowed(const CBlockIndex& block_index)
            (GetBlockProofEquivalentTime(*m_chainman.m_best_header, block_index, *m_chainman.m_best_header, m_chainparams.GetConsensus()) < STALE_RELAY_AGE_LIMIT);
 }
 
+bool PeerManagerImpl::StaleTipBlockRequestAllowed(const Peer& peer, const CBlockIndex& block_index)
+{
+    AssertLockHeld(g_msgproc_mutex);
+    AssertLockHeld(cs_main);
+    return NegotiatedStaleTip(peer) &&
+           m_stale_tips.CanServeStaleBranchBlock(m_chainman.ActiveChain(), &block_index);
+}
+
 bool PeerManagerImpl::BelowLimitedServingThreshold(const CNode& node, const Peer& peer, const CBlockIndex& block_index)
 {
     AssertLockHeld(cs_main);
@@ -2742,7 +2752,7 @@ void PeerManagerImpl::ProcessGetBlockData(CNode& pfrom, Peer& peer, const CInv& 
         if (!pindex) {
             return;
         }
-        if (!BlockRequestAllowed(*pindex)) {
+        if (!BlockRequestAllowed(*pindex) && !StaleTipBlockRequestAllowed(peer, *pindex)) {
             LogDebug(BCLog::NET, "%s: ignoring request from peer=%i for old block that isn't in the main chain\n", __func__, pfrom.GetId());
             return;
         }
@@ -6046,7 +6056,13 @@ void PeerManagerImpl::MaybeSendStaleTips(CNode& node, Peer& peer, CNodeState& st
         // its active tip).
         if (PeerHasHeader(&state, &stale_tip)) continue;
 
-        const bool have_block{(stale_tip.nStatus & BLOCK_HAVE_DATA) != 0 && BlockRequestAllowed(stale_tip)};
+        // The peer fetches the branch from the fork point, so every block on it
+        // must be available and shallow enough to serve. Branch blocks may be
+        // downloaded out of order, so the tip having data is not enough.
+        const CBlockIndex& first_branch_block{*stale_tip.GetAncestor(fork.fork_point.get().nHeight + 1)};
+        const bool have_block{(stale_tip.nStatus & BLOCK_HAVE_DATA) != 0 && stale_tip.HaveNumChainTxs() &&
+                              (BlockRequestAllowed(stale_tip) || StaleTipBlockRequestAllowed(peer, stale_tip)) &&
+                              !BelowLimitedServingThreshold(node, peer, first_branch_block)};
         // Signet stale tips can only be validated with the block data, and
         // peers may disconnect for announcements without it. Defer the
         // announcement until the block data can be served.
