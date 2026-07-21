@@ -297,4 +297,91 @@ BOOST_FIXTURE_TEST_CASE(staletip_tracker_evicts_by_work_not_height, StaleTipTrac
     BOOST_CHECK(IsTracked(candidate));
 }
 
+BOOST_AUTO_TEST_CASE(staletip_tracker_network_policy)
+{
+    LOCK(::cs_main);
+
+    BlockTree tree;
+    CBlockIndex* active{tree.Add(nullptr, true, true)};
+    for (int i{0}; i < 3; ++i) active = tree.Add(active, true, true);
+
+    CBlockIndex* fork{active->pprev};
+    CBlockIndex* headers_only{tree.Add(fork, false)};
+    StaleTipTracker signet_tips{ChainType::SIGNET};
+    BOOST_CHECK(!signet_tips.AddStaleTip(tree.active_chain, headers_only));
+
+    headers_only->nStatus |= BLOCK_VALID_TRANSACTIONS | BLOCK_HAVE_DATA;
+    BOOST_CHECK(signet_tips.AddStaleTip(tree.active_chain, headers_only));
+    // The block was validated, so pruning it keeps the tip eligible.
+    headers_only->nStatus &= ~BLOCK_HAVE_DATA;
+    BOOST_CHECK_EQUAL(signet_tips.GetStaleTips(tree.active_chain).size(), 1U);
+
+    CBlockIndex* low_difficulty{tree.Add(fork, false, true, /*bits=*/0x207fffff)};
+    StaleTipTracker testnet_tips{ChainType::TESTNET};
+    BOOST_CHECK(!testnet_tips.AddStaleTip(tree.active_chain, low_difficulty));
+    StaleTipTracker testnet4_tips{ChainType::TESTNET4};
+    BOOST_CHECK(!testnet4_tips.AddStaleTip(tree.active_chain, low_difficulty));
+
+    // A target just below the limit is accepted, one just above it is not.
+    CBlockIndex* above_limit{tree.Add(fork, false, true, /*bits=*/0x1a100000)};
+    BOOST_CHECK(!testnet_tips.AddStaleTip(tree.active_chain, above_limit));
+    CBlockIndex* at_limit{tree.Add(fork, false, true, /*bits=*/0x1a0fffff)};
+    BOOST_CHECK(testnet_tips.AddStaleTip(tree.active_chain, at_limit));
+}
+
+BOOST_AUTO_TEST_CASE(staletip_tracker_signet_variant_policy)
+{
+    LOCK(::cs_main);
+
+    BlockTree tree;
+    CBlockIndex* active{tree.Add(nullptr, true, true)};
+    for (int i{0}; i < 3; ++i) active = tree.Add(active, true, true);
+
+    CBlockIndex* fork{Assert(Assert(active->pprev)->pprev)};
+    const uint256 shared_merkle_root{uint8_t{42}};
+    CBlockIndex* first_variant{tree.Add(fork, false, true, /*bits=*/0x1d00ffff, shared_merkle_root)};
+    CBlockIndex* second_variant{tree.Add(fork, false, true, /*bits=*/0x1d00ffff, shared_merkle_root)};
+
+    StaleTipTracker tips{ChainType::SIGNET};
+    BOOST_CHECK(tips.AddStaleTip(tree.active_chain, first_variant));
+    BOOST_CHECK(!tips.AddStaleTip(tree.active_chain, second_variant));
+
+    CBlockIndex* extended_second{tree.Add(second_variant, false, true)};
+    BOOST_CHECK(tips.AddStaleTip(tree.active_chain, extended_second));
+    const auto forks{tips.GetStaleTips(tree.active_chain)};
+    BOOST_REQUIRE_EQUAL(forks.size(), 1U);
+    BOOST_CHECK_EQUAL(forks.front().tip.get().GetBlockHash().ToString(), extended_second->GetBlockHash().ToString());
+
+    CBlockIndex* active_variant{tree.Add(active->pprev, false, true, /*bits=*/0x1d00ffff, active->hashMerkleRoot)};
+    BOOST_CHECK(!tips.AddStaleTip(tree.active_chain, active_variant));
+}
+
+BOOST_AUTO_TEST_CASE(staletip_tracker_signet_variant_becomes_active)
+{
+    LOCK(::cs_main);
+
+    BlockTree tree;
+    CBlockIndex* active{tree.Add(nullptr, true, true)};
+    for (int i{0}; i < 3; ++i) active = tree.Add(active, true, true);
+
+    CBlockIndex* fork{active->pprev};
+    const uint256 shared_merkle_root{uint8_t{42}};
+    CBlockIndex* stale{tree.Add(fork, false, true, /*bits=*/0x1d00ffff, shared_merkle_root)};
+
+    StaleTipTracker tips{ChainType::SIGNET};
+    BOOST_CHECK(tips.AddStaleTip(tree.active_chain, stale));
+    BOOST_CHECK_EQUAL(tips.GetStaleTips(tree.active_chain).size(), 1U);
+
+    // Reorg onto a branch whose block at the tracked tip's height is a
+    // variant of it. The tip is no longer eligible, as if it were added now.
+    CBlockIndex* variant{tree.Add(fork, false, true, /*bits=*/0x1d00ffff, shared_merkle_root)};
+    tree.Add(variant, true, true);
+    BOOST_CHECK(!tips.AddStaleTip(tree.active_chain, stale));
+    BOOST_CHECK(tips.GetStaleTips(tree.active_chain).empty());
+
+    // It stays tracked, and is eligible again once the variant is reorged out.
+    tree.active_chain.SetTip(*active);
+    BOOST_CHECK_EQUAL(tips.GetStaleTips(tree.active_chain).size(), 1U);
+}
+
 BOOST_AUTO_TEST_SUITE_END()

@@ -8,6 +8,7 @@
 #include <chain.h>
 #include <kernel/cs_main.h>
 #include <uint256.h>
+#include <util/chaintype.h>
 
 #include <array>
 #include <cstddef>
@@ -44,6 +45,12 @@ struct StaleFork {
  * known to be invalid. A tip that is ineligible only for now, for example
  * because a reorg changed its fork point, stays tracked. A tip that can never
  * become eligible again is dropped the next time a tip is added.
+ *
+ * Stricter policies apply on test networks: on signet the tip's block must
+ * have been validated (the block signature cannot be verified from headers
+ * alone) and header variants are deduplicated, including against the active
+ * chain, while on testnet the tip must meet a minimum difficulty so that
+ * min-difficulty blocks are not relayed.
  */
 class StaleTipTracker
 {
@@ -59,17 +66,24 @@ private:
     std::array<Entry, MAX_ADVERTISED_STALETIPS> m_tips{};
     //! Sequence number to assign to the next addition.
     uint64_t m_next_seqno{1};
+    ChainType m_chain_type{ChainType::MAIN};
     //! Tips more than this many blocks below the active tip are not tracked.
     int m_recent_window{STALETIP_RECENT_WINDOW};
     //! Maximum stale branch length to track.
     size_t m_max_headers{MAX_STALETIP_HEADERS};
 
     /** Find the fork point of `stale_tip` with the active chain, checking that
-     *  the tip is eligible for tracking.
+     *  the tip is eligible for tracking. Checks on the tip's block are left to
+     *  BlockValidatedIfRequired().
      *
      * @return The fork point, or nullptr if the tip is not eligible.
      */
     const CBlockIndex* GetEligibleForkPoint(const CChain& chain, const CBlockIndex& stale_tip) const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    /** Whether `stale_tip`'s block has been validated, if the network requires
+     *  it before the tip is tracked. On signet the block signature cannot be
+     *  verified from headers alone. Once true, this stays true, so it is only
+     *  checked when a tip is added. */
+    bool BlockValidatedIfRequired(const CBlockIndex& stale_tip) const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
     /** Whether `stale_tip` can never become eligible again: it is known to be
      *  invalid, or too far below the active tip. */
     bool IsExpired(const CChain& chain, const CBlockIndex& stale_tip) const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
@@ -81,19 +95,30 @@ private:
      *  When full, the tip with the least work is evicted, preferring to evict
      *  the least recently added among tips with equal work. A tip never
      *  evicts one with equal work, so announcing an evicted tip again cannot
-     *  readmit it while the tracker stays full. */
+     *  readmit it while the tracker stays full. On signet, tracked header
+     *  variants of `stale_tip` are either kept in its place or replaced by it,
+     *  whichever has the longer branch. */
     bool Add(const CBlockIndex& stale_tip) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 
 public:
+    /** Maximum target allowed for testnet stale-tip relay policy. */
+    static const uint256 TESTNET_MAX_TARGET;
+
     StaleTipTracker() = default;
-    /** Construct a tracker with non-default policy parameters. */
-    explicit StaleTipTracker(int recent_window, size_t max_headers)
-        : m_recent_window{recent_window}, m_max_headers{max_headers}
+    /** Construct a tracker with a non-default chain type or policy parameters. */
+    explicit StaleTipTracker(ChainType chain_type, int recent_window = STALETIP_RECENT_WINDOW, size_t max_headers = MAX_STALETIP_HEADERS)
+        : m_chain_type{chain_type}, m_recent_window{recent_window}, m_max_headers{max_headers}
     {
     }
 
-    /** Track `stale_tip` if it is eligible (see GetEligibleForkPoint()) and can
-     *  be retained under the tracker's resource limits.
+    explicit StaleTipTracker(int recent_window, size_t max_headers)
+        : StaleTipTracker{ChainType::MAIN, recent_window, max_headers}
+    {
+    }
+
+    /** Track `stale_tip` if it is eligible (see GetEligibleForkPoint() and
+     *  BlockValidatedIfRequired()) and can be retained under the tracker's
+     *  resource limits.
      *
      * @return Whether the tracker was updated to track `stale_tip`.
      */
