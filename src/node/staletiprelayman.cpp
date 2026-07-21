@@ -1,0 +1,32 @@
+// Copyright (c) The Bitcoin Core developers
+// Distributed under the MIT software license, see the accompanying
+// file COPYING or http://www.opensource.org/licenses/mit-license.php.
+
+#include <node/staletiprelayman.h>
+
+namespace node {
+
+StaleTipRelayManager::StaleTipRelayManager(const StaleTipRelayOptions& opts)
+    : m_opts{opts}, m_tracker{opts.chain_type}
+{
+}
+
+void StaleTipRelayManager::Initialize(BlockManager& blockman, const CChain& chain)
+{
+    AssertLockHeld(::cs_main);
+    m_tracker.Initialize(blockman, chain);
+}
+
+bool StaleTipRelayManager::BlockDisconnected(const CChain& chain, const CBlockIndex& block)
+{
+    AssertLockHeld(::cs_main);
+    return m_tracker.AddStaleTip(chain, &block);
+}
+
+bool StaleTipRelayManager::AcceptedStaleTip(const CChain& chain, const CBlockIndex& tip)
+{
+    AssertLockHeld(::cs_main);
+    return m_tracker.AddStaleTip(chain, &tip);
+}
+
+} // namespace node
