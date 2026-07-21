@@ -5,10 +5,13 @@
 #ifndef BITCOIN_NODE_STALETIPTRACKER_H
 #define BITCOIN_NODE_STALETIPTRACKER_H
 
+#include <arith_uint256.h>
 #include <chain.h>
 #include <kernel/cs_main.h>
+#include <util/chaintype.h>
 
 #include <cstddef>
+#include <optional>
 #include <vector>
 
 /** Maximum number of blocks a tracked stale branch may have after its fork
@@ -46,6 +49,12 @@ struct StaleFork {
  * only for now, for example because a reorg changed its fork point, stays
  * tracked. A tip that can never become eligible again is dropped the next
  * time an eligible tip is added.
+ *
+ * Stricter policies apply on test networks: on signet the tip's block must
+ * have been validated (the block signature cannot be verified from headers
+ * alone) and header variants are deduplicated, including against the active
+ * chain, while on testnet the tip must meet a minimum difficulty so that
+ * min-difficulty blocks are not relayed.
  */
 class StaleTipTracker
 {
@@ -53,13 +62,23 @@ private:
     //! Tracked stale tips in the order they were added, oldest first.
     //! Never holds more than MAX_ADVERTISED_STALETIPS entries.
     std::vector<const CBlockIndex*> m_tips;
+    //! Only track a tip once its block has been validated. Set on signet,
+    //! where the block signature cannot be checked from the header alone.
+    bool m_require_validated_block{false};
+    //! Track at most one header variant of a block, where variants have the
+    //! same previous block and merkle root. Set on signet.
+    bool m_dedup_header_variants{false};
+    //! Highest proof-of-work target a tracked tip may have, if limited. Set
+    //! on testnet3 and testnet4, where minimum-difficulty blocks are cheap.
+    std::optional<arith_uint256> m_max_target;
     //! Tips more than this many blocks below the active tip are not tracked.
     int m_recent_window{STALETIP_RECENT_WINDOW};
     //! Maximum stale branch length to track.
     size_t m_max_headers{MAX_STALETIP_HEADERS};
 
     /** Find the fork point of `stale_tip` with the active chain, checking that
-     *  the tip is eligible.
+     *  the tip is eligible. On signet, AddStaleTip() also requires the tip's
+     *  block to have been validated.
      *
      * @return The fork point, or nullptr if the tip is not eligible.
      */
@@ -75,19 +94,26 @@ private:
      *  When full, the tip with the least work is evicted, preferring to evict
      *  the least recently added among tips with equal work. A tip never
      *  evicts one with equal work, so announcing an evicted tip again cannot
-     *  readmit it while the tracker stays full. */
+     *  readmit it while the tracker stays full.
+     *
+     *  On signet, `stale_tip` is not added if it is a variant of a block on a
+     *  tracked branch, and replaces tracked tips that are variants of a block
+     *  on its own branch. A tip built on a variant of a tracked tip therefore
+     *  replaces it, which BIP 332 does not require. Tips that only descend
+     *  from variants of the same block, without being variants themselves,
+     *  are all kept, as the BIP allows. */
     bool Add(const CBlockIndex& stale_tip) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 
 public:
-    /** Construct a tracker, with optional non-default policy parameters for
-     *  tests. */
-    explicit StaleTipTracker(int recent_window = STALETIP_RECENT_WINDOW, size_t max_headers = MAX_STALETIP_HEADERS)
-        : m_recent_window{recent_window}, m_max_headers{max_headers}
-    {
-    }
+    /** Construct a tracker applying `chain_type`'s policy, with optional
+     *  non-default policy parameters for tests. */
+    explicit StaleTipTracker(ChainType chain_type = ChainType::MAIN,
+                             int recent_window = STALETIP_RECENT_WINDOW,
+                             size_t max_headers = MAX_STALETIP_HEADERS);
 
     /** Track `stale_tip` if it is eligible (see GetEligibleForkPoint()) and can
-     *  be retained under the tracker's resource limits.
+     *  be retained under the tracker's resource limits. On signet, the tip's
+     *  block must also have been validated.
      *
      * @return Whether the tracker was updated to track `stale_tip`.
      */
