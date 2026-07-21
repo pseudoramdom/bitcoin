@@ -719,6 +719,7 @@ void SetupServerArgs(ArgsManager& argsman, bool can_listen_ipc)
                    DEFAULT_PRIVATE_BROADCAST),
                    ArgsManager::ALLOW_ANY,
                    OptionsCategory::NODE_RELAY);
+    argsman.AddArg("-staletips=<mode>", "Track recent stale chain tips for stale-tip relay (BIP 332). Options are 'none' or 'headers' (default: none)", ArgsManager::ALLOW_ANY, OptionsCategory::NODE_RELAY);
     argsman.AddArg("-whitelistforcerelay", strprintf("Add 'forcerelay' permission to whitelisted peers with default permissions. This will relay transactions even if the transactions were already in the mempool. (default: %d)", DEFAULT_WHITELISTFORCERELAY), ArgsManager::ALLOW_ANY, OptionsCategory::NODE_RELAY);
     argsman.AddArg("-whitelistrelay", strprintf("Add 'relay' permission to whitelisted peers with default permissions. This will accept relayed transactions even when not relaying transactions (default: %d)", DEFAULT_WHITELISTRELAY), ArgsManager::ALLOW_ANY, OptionsCategory::NODE_RELAY);
 
@@ -1193,6 +1194,12 @@ bool AppInitParameterInteraction(const ArgsManager& args)
 
     if (args.GetBoolArg("-peerbloomfilters", DEFAULT_PEERBLOOMFILTERS))
         g_local_services = ServiceFlags(g_local_services | NODE_BLOOM);
+
+    if (const auto stale_tips{args.GetArg("-staletips")}) {
+        if (!args.IsArgNegated("-staletips") && !node::ParseStaleTipMode(*stale_tips)) {
+            return InitError(strprintf(_("Invalid value for -staletips=<mode>: '%s'. Expected one of none or headers."), *stale_tips));
+        }
+    }
 
     const std::vector<std::string> test_options = args.GetArgs("-test");
     if (!test_options.empty()) {
