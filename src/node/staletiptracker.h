@@ -20,6 +20,7 @@
 inline constexpr size_t MAX_STALETIP_HEADERS{20};
 
 namespace node {
+class BlockManager;
 
 /** Default number of blocks below the active tip within which a stale tip is
  *  still considered recent enough to be tracked. From BIP 332. */
@@ -110,6 +111,11 @@ public:
     explicit StaleTipTracker(ChainType chain_type = ChainType::MAIN,
                              int recent_window = STALETIP_RECENT_WINDOW,
                              size_t max_headers = MAX_STALETIP_HEADERS);
+
+    /** Track the eligible stale tips already in the block index, as the
+     *  tracker is not persisted. Scans every block index entry, so it is
+     *  meant to be called once at startup. */
+    void SeedFromBlockIndex(const node::BlockManager& blockman, const CChain& active_chain) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 
     /** Track `stale_tip` if it is eligible (see GetEligibleForkPoint()) and can
      *  be retained under the tracker's resource limits. On signet, the tip's
