@@ -719,6 +719,7 @@ void SetupServerArgs(ArgsManager& argsman, bool can_listen_ipc)
                    DEFAULT_PRIVATE_BROADCAST),
                    ArgsManager::ALLOW_ANY,
                    OptionsCategory::NODE_RELAY);
+    argsman.AddArg("-staletips=<mode>", "Track recent stale chain tips for stale-tip relay (BIP 332). Options are 'none' or 'headers' (default: none)", ArgsManager::ALLOW_ANY, OptionsCategory::NODE_RELAY);
     argsman.AddArg("-whitelistforcerelay", strprintf("Add 'forcerelay' permission to whitelisted peers with default permissions. This will relay transactions even if the transactions were already in the mempool. (default: %d)", DEFAULT_WHITELISTFORCERELAY), ArgsManager::ALLOW_ANY, OptionsCategory::NODE_RELAY);
     argsman.AddArg("-whitelistrelay", strprintf("Add 'relay' permission to whitelisted peers with default permissions. This will accept relayed transactions even when not relaying transactions (default: %d)", DEFAULT_WHITELISTRELAY), ArgsManager::ALLOW_ANY, OptionsCategory::NODE_RELAY);
 
@@ -1250,6 +1251,11 @@ bool AppInitParameterInteraction(const ArgsManager& args)
         if (!mempool_result) {
             return InitError(util::ErrorString(mempool_result));
         }
+        PeerManager::Options peerman_opts_dummy{};
+        auto peerman_result{ApplyArgsManOptions(args, peerman_opts_dummy)};
+        if (!peerman_result) {
+            return InitError(util::ErrorString(peerman_result));
+        }
     }
 
     return true;
@@ -1682,7 +1688,7 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
     fDiscover = args.GetBoolArg("-discover", true);
 
     PeerManager::Options peerman_opts{};
-    ApplyArgsManOptions(args, peerman_opts);
+    Assert(ApplyArgsManOptions(args, peerman_opts)); // no error can happen, already checked in AppInitParameterInteraction
 
     {
         // Read asmap file if configured or embedded asmap data and initialize
