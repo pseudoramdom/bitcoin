@@ -77,9 +77,13 @@ private:
     /** Find the fork point of `stale_tip` with the active chain, checking that
      *  the tip is eligible for tracking.
      *
+     * @param[in] allow_more_work Permit tips with more work than the active
+     *            tip. Used when a block is disconnected during a reorg, as it
+     *            may temporarily have more work than the new active tip.
+     *
      * @return The fork point, or nullptr if the tip is not eligible.
      */
-    const CBlockIndex* GetEligibleForkPoint(const CChain& chain, const CBlockIndex& stale_tip) const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    const CBlockIndex* GetEligibleForkPoint(const CChain& chain, const CBlockIndex& stale_tip, bool allow_more_work = false) const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
     /** Whether `stale_tip` can never become eligible again: it is known to be
      *  invalid, or too far below the active tip. */
     bool IsExpired(const CChain& chain, const CBlockIndex& stale_tip) const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
@@ -119,7 +123,7 @@ public:
      *
      * @return Whether the cache was updated to track `stale_tip`.
      */
-    bool AddStaleTip(const CChain& chain, const CBlockIndex* stale_tip) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    bool AddStaleTip(const CChain& chain, const CBlockIndex* stale_tip, bool allow_more_work = false) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
     /** Get the tracked tips that are eligible for relay, with their fork points. */
     std::vector<StaleFork> GetStaleTips(const CChain& chain) const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 };

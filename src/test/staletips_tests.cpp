@@ -294,6 +294,29 @@ BOOST_AUTO_TEST_CASE(staletip_cache_evicts_by_work_not_height)
     BOOST_CHECK(is_tracked(candidate));
 }
 
+BOOST_AUTO_TEST_CASE(staletip_cache_reorged_tip)
+{
+    LOCK(::cs_main);
+
+    BlockTree tree;
+    CBlockIndex* active{tree.Add(nullptr, true, true)};
+    for (int i{0}; i < 3; ++i) active = tree.Add(active, true, true);
+
+    StaleTipCache tips;
+    tree.active_chain.SetTip(*Assert(active->pprev));
+    BOOST_CHECK(!tips.AddStaleTip(tree.active_chain, active));
+    BOOST_CHECK(tips.AddStaleTip(tree.active_chain, active, /*allow_more_work=*/true));
+    BOOST_CHECK(tips.GetStaleTips(tree.active_chain).empty());
+
+    CBlockIndex* new_active{tree.Add(Assert(active->pprev), false, true)};
+    new_active = tree.Add(new_active, false, true);
+    tree.active_chain.SetTip(*new_active);
+
+    const auto forks{tips.GetStaleTips(tree.active_chain)};
+    BOOST_REQUIRE_EQUAL(forks.size(), 1U);
+    BOOST_CHECK_EQUAL(forks[0].tip.get().GetBlockHash().ToString(), active->GetBlockHash().ToString());
+}
+
 BOOST_AUTO_TEST_CASE(staletip_cache_network_policy)
 {
     LOCK(::cs_main);
