@@ -1964,6 +1964,8 @@ std::vector<node::TxOrphanage::OrphanInfo> PeerManagerImpl::GetOrphanTransaction
 
 PeerManagerInfo PeerManagerImpl::GetInfo() const
 {
+    auto stale_tips{WITH_LOCK(::cs_main, return m_stale_tips.GetStaleTipInfo(m_chainman.ActiveChain()))};
+
     LOCK(m_inv_to_send_mutex);
     return PeerManagerInfo{
         .median_outbound_time_offset = m_outbound_time_offsets.Median(),
@@ -1972,6 +1974,7 @@ PeerManagerInfo PeerManagerImpl::GetInfo() const
         .tx_send_rate = m_opts.tx_send_rate,
         .inbound_bucket = m_inbound_inv_bucket.info(),
         .outbound_bucket = m_outbound_inv_bucket.info(),
+        .stale_tips = std::move(stale_tips),
     };
 }
 
@@ -2146,7 +2149,7 @@ PeerManagerImpl::PeerManagerImpl(CConnman& connman, AddrMan& addrman,
 {
     // Seeding the stale-tip cache scans the entire block index, so skip it
     // when stale-tip relay is disabled. The cache then only reflects reorgs
-    // observed while running.
+    // observed while running, for getnetworkinfo diagnostics.
     if (m_opts.stale_tip_mode != StaleTipMode::NONE) {
         LOCK(::cs_main);
         m_stale_tips.Initialize(m_chainman.m_blockman, m_chainman.ActiveChain());

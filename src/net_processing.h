@@ -97,6 +97,8 @@ struct PeerManagerInfo {
     unsigned int tx_send_rate{0};
     InvBucketInfo inbound_bucket;
     InvBucketInfo outbound_bucket;
+    //! Recently seen stale tips that are being tracked.
+    std::vector<StaleTipInfo> stale_tips;
 };
 
 class PeerManager : public CValidationInterface, public NetEventsInterface
