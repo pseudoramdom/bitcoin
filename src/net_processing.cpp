@@ -576,6 +576,8 @@ public:
         EXCLUSIVE_LOCKS_REQUIRED(!m_tx_download_mutex);
     void BlockDisconnected(const std::shared_ptr<const CBlock> &block, const CBlockIndex* pindex) override
         EXCLUSIVE_LOCKS_REQUIRED(!m_tx_download_mutex);
+    bool WantsAcceptedStaleTip() const override { return m_opts.stale_tip_mode != StaleTipMode::NONE; }
+    void AcceptedStaleTip(const CBlockIndex* pindex) override;
     void UpdatedBlockTip(const CBlockIndex *pindexNew, const CBlockIndex *pindexFork, bool fInitialDownload) override
         EXCLUSIVE_LOCKS_REQUIRED(!m_peer_mutex);
     void BlockChecked(const std::shared_ptr<const CBlock>& block, const BlockValidationState& state) override
@@ -872,6 +874,9 @@ private:
 
     /** Next time to check for stale tip */
     std::chrono::seconds m_stale_tip_check_time GUARDED_BY(cs_main){0s};
+
+    /** Cache of recently seen stale tips. */
+    StaleTipCache m_stale_tips GUARDED_BY(cs_main){m_chainparams.GetChainType()};
 
     node::Warnings& m_warnings;
     TimeOffsets m_outbound_time_offsets{m_warnings};
@@ -2139,6 +2144,14 @@ PeerManagerImpl::PeerManagerImpl(CConnman& connman, AddrMan& addrman,
       m_inbound_inv_bucket(/*rate=*/m_opts.tx_send_rate, /*mult=*/1.0),
       m_outbound_inv_bucket(/*rate=*/m_opts.tx_send_rate, /*mult=*/OUTBOUND_INVENTORY_BUCKET_MULTIPLIER)
 {
+    // Seeding the stale-tip cache scans the entire block index, so skip it
+    // when stale-tip relay is disabled. The cache then only reflects reorgs
+    // observed while running.
+    if (m_opts.stale_tip_mode != StaleTipMode::NONE) {
+        LOCK(::cs_main);
+        m_stale_tips.Initialize(m_chainman.m_blockman, m_chainman.ActiveChain());
+    }
+
     // While Erlay support is incomplete, it must be enabled explicitly via -txreconciliation.
     // This argument can go away after Erlay support is complete.
     if (opts.reconcile_txs) {
@@ -2216,8 +2229,19 @@ void PeerManagerImpl::BlockConnected(
 
 void PeerManagerImpl::BlockDisconnected(const std::shared_ptr<const CBlock> &block, const CBlockIndex* pindex)
 {
+    if (WITH_LOCK(::cs_main, return m_stale_tips.AddStaleTip(m_chainman.ActiveChain(), pindex, /*allow_more_work=*/true))) {
+        m_connman.WakeMessageHandler();
+    }
+
     LOCK(m_tx_download_mutex);
     m_txdownloadman.BlockDisconnected();
+}
+
+void PeerManagerImpl::AcceptedStaleTip(const CBlockIndex* pindex)
+{
+    if (WITH_LOCK(::cs_main, return m_stale_tips.AddStaleTip(m_chainman.ActiveChain(), pindex))) {
+        m_connman.WakeMessageHandler();
+    }
 }
 
 /**
