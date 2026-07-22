@@ -6,6 +6,17 @@
 
 namespace node {
 
+StaleTipAnnouncementResult CheckStaleTipAnnouncement(const CBlockIndex& fork_point, size_t num_headers, const arith_uint256& claimed_work,
+                                                     const CBlockIndex* active_tip, const arith_uint256& work_threshold,
+                                                     int recent_window)
+{
+    if (active_tip != nullptr && fork_point.nHeight + static_cast<int>(num_headers) < active_tip->nHeight - recent_window) {
+        return StaleTipAnnouncementResult::OUTSIDE_RECENT_WINDOW;
+    }
+    if (fork_point.nChainWork + claimed_work < work_threshold) return StaleTipAnnouncementResult::LOW_WORK;
+    return StaleTipAnnouncementResult::OK;
+}
+
 StaleTipRelayManager::StaleTipRelayManager(const StaleTipRelayOptions& opts)
     : m_opts{opts}, m_tracker{opts.chain_type}
 {
