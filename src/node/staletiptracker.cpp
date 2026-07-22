@@ -182,6 +182,12 @@ bool StaleTipTracker::AddStaleTip(const CChain& active_chain, const CBlockIndex&
     return Add(stale_tip);
 }
 
+bool StaleTipTracker::CanRequestStaleTipBlock(const CChain& active_chain, const CBlockIndex& stale_tip) const
+{
+    AssertLockHeld(::cs_main);
+    return GetEligibleForkPoint(active_chain, stale_tip) != nullptr;
+}
+
 bool StaleTipTracker::CanServeStaleBranchBlock(const CChain& active_chain, const CBlockIndex& block) const
 {
     AssertLockHeld(::cs_main);
