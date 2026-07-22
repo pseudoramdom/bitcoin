@@ -865,8 +865,8 @@ private:
 
     void ProcessStaleTip(CNode& pfrom, Peer& peer, DataStream& vRecv) EXCLUSIVE_LOCKS_REQUIRED(g_msgproc_mutex);
 
-    /** Add a stale tip to the cache if it is not on the active chain. */
-    void HandleStaleTip(const CBlockIndex* pindex) EXCLUSIVE_LOCKS_REQUIRED(g_msgproc_mutex, cs_main);
+    /** Add a stale tip to the cache and update peer state if appropriate. */
+    void HandleStaleTip(CNode& pfrom, Peer& peer, const CBlockIndex* pindex, bool peer_has_block, bool received_new_header) EXCLUSIVE_LOCKS_REQUIRED(g_msgproc_mutex, cs_main);
 
     FastRandomContext m_rng GUARDED_BY(NetEventsInterface::g_msgproc_mutex);
 
@@ -6015,7 +6015,7 @@ void PeerManagerImpl::ProcessStaleTip(CNode& pfrom, Peer& peer, DataStream& vRec
         const CBlockIndex* known_tip{m_chainman.m_blockman.LookupBlockIndex(tip_hash)};
         const CBlockIndex* active_tip{m_chainman.ActiveTip()};
         if (known_tip != nullptr) {
-            HandleStaleTip(known_tip);
+            HandleStaleTip(pfrom, peer, known_tip, stale_tip_data.m_have_block, /*received_new_header=*/false);
             return;
         }
 
@@ -6042,15 +6042,24 @@ void PeerManagerImpl::ProcessStaleTip(CNode& pfrom, Peer& peer, DataStream& vRec
     }
 
     LOCK(cs_main);
-    HandleStaleTip(pindexLast);
+    HandleStaleTip(pfrom, peer, pindexLast, stale_tip_data.m_have_block, /*received_new_header=*/true);
 }
 
-void PeerManagerImpl::HandleStaleTip(const CBlockIndex* pindex)
+void PeerManagerImpl::HandleStaleTip(CNode& pfrom, Peer& peer, const CBlockIndex* pindex, bool peer_has_block, bool received_new_header)
 {
     AssertLockHeld(g_msgproc_mutex);
     AssertLockHeld(cs_main);
 
     if (pindex == nullptr) return;
+    // A known-invalid tip must not advance the peer's header state.
+    if (!pindex->IsValid(BLOCK_VALID_TREE)) return;
+
+    const CBlockIndex* active_tip{m_chainman.ActiveTip()};
+    if (peer_has_block && active_tip != nullptr && pindex->nChainWork > active_tip->nChainWork) {
+        UpdatePeerStateForReceivedHeaders(pfrom, *pindex, received_new_header, /*may_have_more_headers=*/false);
+        HeadersDirectFetchBlocks(pfrom, peer, *pindex);
+    }
+
     if (m_chainman.ActiveChain().Contains(*pindex)) return;
     (void)m_stale_tips.AddStaleTip(m_chainman.ActiveChain(), pindex);
 }
