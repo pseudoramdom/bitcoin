@@ -214,12 +214,19 @@ static constexpr auto PRIVATE_BROADCAST_MAX_CONNECTION_LIFETIME{3min};
 
 // Internal stuff
 namespace {
+/** Whether a block download is needed or merely useful. */
+enum class BlockRequestType : bool {
+    REQUIRED, //!< Timing out disconnects the peer.
+    BEST_EFFORT, //!< Timing out drops the request instead.
+};
+
 /** Blocks that are in flight, and that are in the queue to be downloaded. */
 struct QueuedBlock {
     /** BlockIndex. We must have this since we only request blocks when we've already validated the header. */
     const CBlockIndex* pindex;
     /** Optional, used for CMPCTBLOCK downloads */
     std::unique_ptr<PartiallyDownloadedBlock> partialBlock;
+    BlockRequestType m_type{BlockRequestType::REQUIRED};
 };
 
 /**
@@ -1048,7 +1055,13 @@ private:
      * Returns false, still setting pit, if the block was already in flight from the same peer
      * pit will only be valid as long as the same cs_main lock is being held
      */
-    bool BlockRequested(NodeId nodeid, const CBlockIndex& block, std::list<QueuedBlock>::iterator** pit = nullptr) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+    bool BlockRequested(NodeId nodeid, const CBlockIndex& block, std::list<QueuedBlock>::iterator** pit = nullptr, BlockRequestType type = BlockRequestType::REQUIRED) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+
+    /** Drop all of a peer's in-flight best-effort block requests, after one of
+     *  them timed out. Unlike a required request, this does not disconnect the
+     *  peer. Removing the front request restarts the download timeout for the
+     *  peer's remaining requests. */
+    void ClearBestEffortBlockRequests(NodeId nodeid, CNodeState& state) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
 
     bool TipMayBeStale() EXCLUSIVE_LOCKS_REQUIRED(cs_main);
 
@@ -1397,7 +1410,7 @@ void PeerManagerImpl::RemoveBlockRequest(const uint256& hash, std::optional<Node
     }
 }
 
-bool PeerManagerImpl::BlockRequested(NodeId nodeid, const CBlockIndex& block, std::list<QueuedBlock>::iterator** pit)
+bool PeerManagerImpl::BlockRequested(NodeId nodeid, const CBlockIndex& block, std::list<QueuedBlock>::iterator** pit, BlockRequestType type)
 {
     const uint256& hash{block.GetBlockHash()};
 
@@ -1412,6 +1425,11 @@ bool PeerManagerImpl::BlockRequested(NodeId nodeid, const CBlockIndex& block, st
             if (pit) {
                 *pit = &range.first->second.second;
             }
+            // A required request supersedes a best-effort one, so the block
+            // gets normal block-download timeout handling.
+            if (type == BlockRequestType::REQUIRED) {
+                range.first->second.second->m_type = BlockRequestType::REQUIRED;
+            }
             return false;
         }
     }
@@ -1420,7 +1438,7 @@ bool PeerManagerImpl::BlockRequested(NodeId nodeid, const CBlockIndex& block, st
     RemoveBlockRequest(hash, nodeid);
 
     std::list<QueuedBlock>::iterator it = state->vBlocksInFlight.insert(state->vBlocksInFlight.end(),
-            {&block, std::unique_ptr<PartiallyDownloadedBlock>(pit ? new PartiallyDownloadedBlock(&m_mempool) : nullptr)});
+            {&block, std::unique_ptr<PartiallyDownloadedBlock>(pit ? new PartiallyDownloadedBlock(&m_mempool) : nullptr), type});
     if (state->vBlocksInFlight.size() == 1) {
         // We're starting a block download (batch) from this peer.
         state->m_downloading_since = GetTime<std::chrono::microseconds>();
@@ -1431,6 +1449,18 @@ bool PeerManagerImpl::BlockRequested(NodeId nodeid, const CBlockIndex& block, st
         *pit = &itInFlight->second.second;
     }
     return true;
+}
+
+void PeerManagerImpl::ClearBestEffortBlockRequests(NodeId nodeid, CNodeState& state)
+{
+    // RemoveBlockRequest() erases from vBlocksInFlight, so collect first.
+    std::vector<uint256> hashes;
+    for (const QueuedBlock& block : state.vBlocksInFlight) {
+        if (block.m_type == BlockRequestType::BEST_EFFORT) hashes.push_back(block.pindex->GetBlockHash());
+    }
+    LogDebug(BCLog::NET, "Timeout downloading best-effort block %s from peer=%d; clearing %u best-effort block request(s)",
+             state.vBlocksInFlight.front().pindex->GetBlockHash().ToString(), nodeid, hashes.size());
+    for (const uint256& hash : hashes) RemoveBlockRequest(hash, nodeid);
 }
 
 void PeerManagerImpl::MaybeSetPeerAsAnnouncingHeaderAndIDs(NodeId nodeid)
@@ -6734,9 +6764,13 @@ bool PeerManagerImpl::SendMessages(CNode& node)
             QueuedBlock &queuedBlock = state.vBlocksInFlight.front();
             int nOtherPeersWithValidatedDownloads = m_peers_downloading_from - 1;
             if (current_time > state.m_downloading_since + std::chrono::seconds{consensusParams.nPowTargetSpacing} * (BLOCK_DOWNLOAD_TIMEOUT_BASE + BLOCK_DOWNLOAD_TIMEOUT_PER_PEER * nOtherPeersWithValidatedDownloads)) {
-                LogInfo("Timeout downloading block %s, %s", queuedBlock.pindex->GetBlockHash().ToString(), node.DisconnectMsg());
-                node.fDisconnect = true;
-                return true;
+                if (queuedBlock.m_type == BlockRequestType::BEST_EFFORT) {
+                    ClearBestEffortBlockRequests(node.GetId(), state);
+                } else {
+                    LogInfo("Timeout downloading block %s, %s", queuedBlock.pindex->GetBlockHash().ToString(), node.DisconnectMsg());
+                    node.fDisconnect = true;
+                    return true;
+                }
             }
         }
         // If the peer failed to answer our ping in time, disconnect due to timeout.
