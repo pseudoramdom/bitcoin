@@ -10,6 +10,8 @@ from contextlib import nullcontext
 from test_framework.blocktools import create_block
 from test_framework.messages import (
     CBlockHeader,
+    MSG_BLOCK,
+    MSG_TYPE_MASK,
     StaleTipCompressedHeader,
     msg_feature,
     msg_headers,
@@ -47,6 +49,7 @@ class StaleTipPeer(P2PInterface):
         self.send_feature = send_feature
         self.feature_data = feature_data
         self.features = []
+        self.getdata = []
 
     def on_version(self, message):
         if self.send_feature and message.nVersion >= FEATURE_VERSION:
@@ -55,6 +58,15 @@ class StaleTipPeer(P2PInterface):
 
     def on_feature(self, message):
         self.features.append(message)
+
+    def on_getdata(self, message):
+        self.getdata.extend(message.inv)
+
+    def wait_for_getdata_hash(self, block_hash):
+        self.wait_until(lambda: any(
+            inv.hash == block_hash and inv.type & MSG_TYPE_MASK == MSG_BLOCK
+            for inv in self.getdata
+        ))
 
 
 class P2PStaleTipTest(BitcoinTestFramework):
@@ -72,6 +84,7 @@ class P2PStaleTipTest(BitcoinTestFramework):
         self.test_reorged_out_active_tip_tracked()
         self.test_tracked_tip_listed_with_known_descendants()
         self.test_inbound_staletip_handling()
+        self.test_higher_work_staletip_requests_block()
         self.test_startup_seeding_only_when_enabled()
 
     def relayable_staletips(self):
@@ -109,6 +122,19 @@ class P2PStaleTipTest(BitcoinTestFramework):
             prev_hash = block.hash_int
             height += 1
         return blocks, fork_point_hash
+
+    def active_block(self):
+        node = self.nodes[0]
+        active_tip_hash = node.getbestblockhash()
+        active_tip = node.getblock(active_tip_hash)
+        block = create_block(
+            hashprev=int(active_tip_hash, 16),
+            height=active_tip["height"] + 1,
+            ntime=active_tip["time"] + self.block_time_offset,
+        )
+        self.block_time_offset += 1
+        block.solve()
+        return block, int(active_tip_hash, 16)
 
     def staletip_msg(self, blocks, fork_point_hash, *, have_block=False):
         if not isinstance(blocks, list):
@@ -329,6 +355,34 @@ class P2PStaleTipTest(BitcoinTestFramework):
         block, fork_point_hash = self.stale_block(fork_depth=2)
         self.check_inbound_staletip(self.staletip_msg(block, fork_point_hash), block, outcome="ignore", expected_log="ignoring low-work staletip")
         self.restart_node(0, extra_args=["-debug=net", "-peertimeout=999", "-staletips=headers"])
+
+    def test_higher_work_staletip_requests_block(self):
+        self.log.info("Test block data is requested for a higher-work staletip")
+        headers_peer = self.connect_peer(feature_data=b"\x00")
+        block, fork_point_hash = self.active_block()
+        headers_peer.send_and_ping(self.staletip_msg(block, fork_point_hash, have_block=False))
+        assert_equal([
+            inv.hash for inv in headers_peer.getdata
+            if inv.type & MSG_TYPE_MASK == MSG_BLOCK
+        ], [])
+        self.nodes[0].disconnect_p2ps()
+
+        block_peer = self.connect_peer(feature_data=b"\x00")
+        block_peer.send_and_ping(self.staletip_msg(block, fork_point_hash, have_block=True))
+        block_peer.wait_for_getdata_hash(block.hash_int)
+        self.nodes[0].disconnect_p2ps()
+
+        # Headers mode does not download a stale tip that has no more work.
+        equal_work_peer = self.connect_peer(feature_data=b"\x00")
+        equal_work_block, equal_work_fork_point_hash = self.stale_block()
+        equal_work_peer.send_and_ping(self.staletip_msg(equal_work_block, equal_work_fork_point_hash, have_block=True))
+        self.assert_staletip_relayable(equal_work_block)
+        equal_work_peer.sync_with_ping()
+        assert_equal([
+            inv.hash for inv in equal_work_peer.getdata
+            if inv.type & MSG_TYPE_MASK == MSG_BLOCK
+        ], [])
+        self.nodes[0].disconnect_p2ps()
 
     def test_startup_seeding_only_when_enabled(self):
         self.log.info("Test stale-tip tracker is seeded at startup only when enabled")
