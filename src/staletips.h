@@ -193,9 +193,14 @@ private:
     /** Find the fork point of `stale_tip` with the active chain, checking that
      *  the tip is eligible for tracking.
      *
+     * @param[in] require_signet_block_data Whether to enforce the signet
+     *            requirement that the tip's block data is available.
      * @return The fork point, or nullptr if the tip is not eligible.
      */
-    const CBlockIndex* GetEligibleForkPoint(const CChain& chain, const CBlockIndex& stale_tip) const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    const CBlockIndex* GetEligibleForkPoint(const CChain& chain, const CBlockIndex& stale_tip, bool require_signet_block_data = true) const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    /** Whether `stale_tip` is eligible for tracking, including the
+     *  signet deduplication of header variants. See GetEligibleForkPoint(). */
+    bool IsStaleTipEligible(const CChain& chain, const CBlockIndex* stale_tip, bool require_signet_block_data = true) const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
     /** Whether `stale_tip` can never become eligible again: it is known to be
      *  invalid, or too far below the active tip. */
     bool IsExpired(const CChain& chain, const CBlockIndex& stale_tip) const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
@@ -233,15 +238,20 @@ public:
     /** Whether no stale tips are currently retained. */
     bool Empty() const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 
-    /** Track `stale_tip` if it is eligible (see GetEligibleForkPoint()) and can
+    /** Track `stale_tip` if it is eligible (see IsStaleTipEligible()) and can
      *  be retained under the cache's resource limits.
      *
      * @return Whether the cache was updated to track `stale_tip`.
      */
     bool AddStaleTip(const CChain& chain, const CBlockIndex* stale_tip) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    /** Whether the block data for `stale_tip` may be requested from a peer.
+     *  Unlike AddStaleTip(), this does not require the block data to already
+     *  be available on signet, as it is exactly what would be requested. */
+    bool CanRequestStaleTipBlock(const CChain& chain, const CBlockIndex* stale_tip) const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
     /** Whether `block` is stored on a tracked, still-eligible stale branch and
      *  may be served to a peer that negotiated stale-tip relay. */
     bool CanServeStaleBranchBlock(const CChain& chain, const CBlockIndex* block) const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+
     /** Get the tracked tips that are eligible for relay, with their fork
      *  points, in the order they were added. */
     std::vector<StaleFork> GetStaleTips(const CChain& chain) const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);

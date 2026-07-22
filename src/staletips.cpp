@@ -106,7 +106,7 @@ StaleTipMessage::HeaderDecompressionResult StaleTipMessage::DecompressHeaders() 
     };
 }
 
-const CBlockIndex* StaleTipCache::GetEligibleForkPoint(const CChain& chain, const CBlockIndex& stale_tip) const
+const CBlockIndex* StaleTipCache::GetEligibleForkPoint(const CChain& chain, const CBlockIndex& stale_tip, bool require_signet_block_data) const
 {
     const CBlockIndex* active_tip{chain.Tip()};
     if (active_tip == nullptr) return nullptr;
@@ -114,7 +114,7 @@ const CBlockIndex* StaleTipCache::GetEligibleForkPoint(const CChain& chain, cons
     if (IsExpired(chain, stale_tip)) return nullptr;
     if (stale_tip.nChainWork > active_tip->nChainWork) return nullptr;
 
-    if (m_chain_type == ChainType::SIGNET && !(stale_tip.nStatus & BLOCK_HAVE_DATA)) return nullptr;
+    if (require_signet_block_data && m_chain_type == ChainType::SIGNET && !(stale_tip.nStatus & BLOCK_HAVE_DATA)) return nullptr;
 
     if (m_chain_type == ChainType::TESTNET || m_chain_type == ChainType::TESTNET4) {
         arith_uint256 target;
@@ -144,6 +144,19 @@ void StaleTipCache::PruneExpired(const CChain& chain)
     for (auto& entry : m_tips) {
         if (entry.tip != nullptr && IsExpired(chain, *entry.tip)) entry = {};
     }
+}
+
+bool StaleTipCache::IsStaleTipEligible(const CChain& chain, const CBlockIndex* stale_tip, bool require_signet_block_data) const
+{
+    AssertLockHeld(::cs_main);
+    if (stale_tip == nullptr) return false;
+    if (GetEligibleForkPoint(chain, *stale_tip, require_signet_block_data) == nullptr) return false;
+
+    if (m_chain_type == ChainType::SIGNET && chain.Tip() != nullptr) {
+        if (CompareSignetHeaderVariants(*stale_tip, *chain.Tip()) == SignetHeaderVariantResult::PREFER_EXISTING) return false;
+    }
+
+    return true;
 }
 
 bool StaleTipCache::Add(const CBlockIndex& stale_tip)
@@ -236,15 +249,16 @@ bool StaleTipCache::Empty() const
 bool StaleTipCache::AddStaleTip(const CChain& chain, const CBlockIndex* stale_tip)
 {
     AssertLockHeld(::cs_main);
-    if (stale_tip == nullptr) return false;
-    if (GetEligibleForkPoint(chain, *stale_tip) == nullptr) return false;
-
-    if (m_chain_type == ChainType::SIGNET && chain.Tip() != nullptr) {
-        if (CompareSignetHeaderVariants(*stale_tip, *chain.Tip()) == SignetHeaderVariantResult::PREFER_EXISTING) return false;
-    }
+    if (!IsStaleTipEligible(chain, stale_tip, /*require_signet_block_data=*/true)) return false;
 
     PruneExpired(chain);
     return Add(*stale_tip);
+}
+
+bool StaleTipCache::CanRequestStaleTipBlock(const CChain& chain, const CBlockIndex* stale_tip) const
+{
+    AssertLockHeld(::cs_main);
+    return IsStaleTipEligible(chain, stale_tip, /*require_signet_block_data=*/false);
 }
 
 bool StaleTipCache::CanServeStaleBranchBlock(const CChain& chain, const CBlockIndex* block) const
