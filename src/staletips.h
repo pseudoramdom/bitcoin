@@ -148,6 +148,22 @@ struct StaleTipMessage
     }
 };
 
+/** Outcome of CheckStaleTipAnnouncement(). */
+enum class StaleTipAnnouncementCheck {
+    OK,
+    //! The announced tip is more than STALETIP_RECENT_WINDOW blocks below the
+    //! active tip.
+    OUTSIDE_RECENT_WINDOW,
+    //! The announced branch has less work than the anti-DoS threshold.
+    LOW_WORK,
+};
+
+/** Check an announced stale branch of `num_headers` headers, forking off at
+ *  `fork_point` and claiming `claimed_work`, against the active tip and the
+ *  anti-DoS `work_threshold`. */
+StaleTipAnnouncementCheck CheckStaleTipAnnouncement(const CBlockIndex& fork_point, size_t num_headers, const arith_uint256& claimed_work,
+                                                    const CBlockIndex* active_tip, const arith_uint256& work_threshold);
+
 /** Tracker of recently seen stale tips: tips of valid (or potentially valid)
  *  branches of the block tree that are not part of the active chain.
  *

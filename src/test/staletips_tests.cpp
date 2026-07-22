@@ -273,6 +273,30 @@ BOOST_AUTO_TEST_CASE(staletip_feature_parse)
     }
 }
 
+BOOST_AUTO_TEST_CASE(staletip_check_announcement)
+{
+    LOCK(::cs_main);
+
+    BlockTree tree;
+    CBlockIndex* active{tree.Add(nullptr, true)};
+    while (active->nHeight < STALETIP_RECENT_WINDOW + 10) active = tree.Add(active, true);
+    // The lowest fork point whose one-block branch is still within the
+    // recency window.
+    const CBlockIndex& fork_point{*Assert(active->GetAncestor(active->nHeight - STALETIP_RECENT_WINDOW - 1))};
+    const arith_uint256 claimed_work{2};
+    const arith_uint256 threshold{fork_point.nChainWork + claimed_work};
+
+    BOOST_CHECK(CheckStaleTipAnnouncement(fork_point, 1, claimed_work, active, threshold) == StaleTipAnnouncementCheck::OK);
+    BOOST_CHECK(CheckStaleTipAnnouncement(*fork_point.pprev, 1, claimed_work, active, threshold) == StaleTipAnnouncementCheck::OUTSIDE_RECENT_WINDOW);
+    // A longer branch from a lower fork point can still reach into the window.
+    BOOST_CHECK(CheckStaleTipAnnouncement(*fork_point.pprev, 2, claimed_work, active, threshold - arith_uint256{1}) == StaleTipAnnouncementCheck::OK);
+
+    // The branch must meet the work threshold, which still applies without an
+    // active tip.
+    BOOST_CHECK(CheckStaleTipAnnouncement(fork_point, 1, claimed_work - arith_uint256{1}, active, threshold) == StaleTipAnnouncementCheck::LOW_WORK);
+    BOOST_CHECK(CheckStaleTipAnnouncement(*fork_point.pprev, 1, claimed_work, nullptr, threshold) == StaleTipAnnouncementCheck::LOW_WORK);
+}
+
 BOOST_AUTO_TEST_CASE(staletip_tracker_basic)
 {
     LOCK(::cs_main);

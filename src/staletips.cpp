@@ -103,6 +103,16 @@ std::vector<CBlockHeader> StaleTipMessage::DecompressHeaders() const
     return headers;
 }
 
+StaleTipAnnouncementCheck CheckStaleTipAnnouncement(const CBlockIndex& fork_point, size_t num_headers, const arith_uint256& claimed_work,
+                                                    const CBlockIndex* active_tip, const arith_uint256& work_threshold)
+{
+    if (active_tip != nullptr && fork_point.nHeight + static_cast<int>(num_headers) < active_tip->nHeight - STALETIP_RECENT_WINDOW) {
+        return StaleTipAnnouncementCheck::OUTSIDE_RECENT_WINDOW;
+    }
+    if (fork_point.nChainWork + claimed_work < work_threshold) return StaleTipAnnouncementCheck::LOW_WORK;
+    return StaleTipAnnouncementCheck::OK;
+}
+
 const CBlockIndex* StaleTipTracker::GetEligibleForkPoint(const CChain& chain, const CBlockIndex& stale_tip) const
 {
     const CBlockIndex* active_tip{chain.Tip()};

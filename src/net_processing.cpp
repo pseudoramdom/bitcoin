@@ -864,6 +864,8 @@ private:
     /** Send `feefilter` message. */
     void MaybeSendFeefilter(CNode& node, Peer& peer, std::chrono::microseconds current_time) EXCLUSIVE_LOCKS_REQUIRED(g_msgproc_mutex);
 
+    void ProcessStaleTip(CNode& pfrom, Peer& peer, DataStream& vRecv) EXCLUSIVE_LOCKS_REQUIRED(g_msgproc_mutex);
+
     FastRandomContext m_rng GUARDED_BY(NetEventsInterface::g_msgproc_mutex);
 
     /** Copied into short-lived tx INV deduplication sets to avoid generating salts per message. */
@@ -900,6 +902,13 @@ private:
     std::chrono::seconds m_stale_tip_check_time GUARDED_BY(cs_main){0s};
 
     bool StaleTipRelayEnabled() const { return m_stale_tip_relay != nullptr; }
+    /** The peer's staletip feature, or std::nullopt if either side has
+     *  stale-tip relay disabled. */
+    std::optional<StaleTipFeature> NegotiatedStaleTip(const Peer& peer) const
+    {
+        if (!StaleTipRelayEnabled()) return std::nullopt;
+        return peer.GetFeatures().stale_tip;
+    }
 
     node::Warnings& m_warnings;
     TimeOffsets m_outbound_time_offsets{m_warnings};
@@ -4410,6 +4419,11 @@ void PeerManagerImpl::ProcessMessage(Peer& peer, CNode& pfrom, const std::string
         }
     }
 
+    if (msg_type == NetMsgType::STALETIP) {
+        ProcessStaleTip(pfrom, peer, vRecv);
+        return;
+    }
+
     if (msg_type == NetMsgType::ADDR || msg_type == NetMsgType::ADDRV2) {
         const auto ser_params{
             msg_type == NetMsgType::ADDRV2 ?
@@ -5950,6 +5964,80 @@ void PeerManagerImpl::MaybeSendFeefilter(CNode& pto, Peer& peer, std::chrono::mi
                 (currentFilter < 3 * peer.m_fee_filter_sent / 4 || currentFilter > 4 * peer.m_fee_filter_sent / 3)) {
         peer.m_next_send_feefilter = current_time + m_rng.randrange<std::chrono::microseconds>(MAX_FEEFILTER_CHANGE_DELAY);
     }
+}
+
+void PeerManagerImpl::ProcessStaleTip(CNode& pfrom, Peer& peer, DataStream& vRecv)
+{
+    if (!NegotiatedStaleTip(peer)) {
+        LogDebug(BCLog::NET, "ignoring unnegotiated staletip from peer=%d", pfrom.GetId());
+        return;
+    }
+
+    StaleTipMessage stale_tip_data;
+    try {
+        vRecv >> stale_tip_data;
+        if (!vRecv.empty()) throw std::ios_base::failure{"trailing staletip bytes"};
+    } catch (const StaleTipHeadersLimitExceeded& e) {
+        LogDebug(BCLog::NET, "ignoring staletip from peer=%d: %s", pfrom.GetId(), e.what());
+        return;
+    } catch (const std::exception& e) {
+        LogDebug(BCLog::NET, "malformed staletip from peer=%d: %s, %s", pfrom.GetId(), e.what(), pfrom.DisconnectMsg());
+        pfrom.fDisconnect = true;
+        return;
+    }
+
+    const std::vector<CBlockHeader> headers{stale_tip_data.DecompressHeaders()};
+    const uint256 tip_hash{headers.back().GetHash()};
+    // Reconstructed headers are continuous by construction: each previous
+    // block hash is computed from the preceding header.
+    Assume(CheckHeadersAreContinuous(headers));
+
+    if (!HasValidProofOfWork(headers, m_chainparams.GetConsensus())) {
+        LogDebug(BCLog::NET, "ignoring staletip with invalid headers from peer=%d", pfrom.GetId());
+        return;
+    }
+
+    const arith_uint256 claimed_headers_work{CalculateClaimedHeadersWork(headers)};
+    // Use the stale-tip recency window instead of the default anti-DoS
+    // window, so tips that senders may advertise aren't discarded. This
+    // check is what makes min_pow_checked=true below safe.
+    const arith_uint256 stale_tip_work_threshold{GetAntiDoSWorkThreshold(STALETIP_RECENT_WINDOW)};
+    {
+        LOCK(cs_main);
+
+        const CBlockIndex* known_tip{m_chainman.m_blockman.LookupBlockIndex(tip_hash)};
+        const CBlockIndex* active_tip{m_chainman.ActiveTip()};
+        if (known_tip != nullptr) {
+            (void)m_stale_tip_relay->AcceptedStaleTip(m_chainman.ActiveChain(), *known_tip);
+            return;
+        }
+
+        const CBlockIndex* fork_point{m_chainman.m_blockman.LookupBlockIndex(stale_tip_data.m_fork_point)};
+        if (fork_point == nullptr) {
+            LogDebug(BCLog::NET, "ignoring staletip with unknown fork point %s from peer=%d", stale_tip_data.m_fork_point.ToString(), pfrom.GetId());
+            return;
+        }
+        switch (CheckStaleTipAnnouncement(*fork_point, headers.size(), claimed_headers_work, active_tip, stale_tip_work_threshold)) {
+        case StaleTipAnnouncementCheck::OK:
+            break;
+        case StaleTipAnnouncementCheck::OUTSIDE_RECENT_WINDOW:
+            LogDebug(BCLog::NET, "ignoring staletip outside recency window from peer=%d", pfrom.GetId());
+            return;
+        case StaleTipAnnouncementCheck::LOW_WORK:
+            LogDebug(BCLog::NET, "ignoring low-work staletip %s from peer=%d", tip_hash.ToString(), pfrom.GetId());
+            return;
+        } // no default case, so the compiler can warn about missing cases
+    }
+
+    BlockValidationState state;
+    const CBlockIndex* pindexLast{nullptr};
+    if (!m_chainman.ProcessNewBlockHeaders(headers, /*min_pow_checked=*/true, state, &pindexLast)) {
+        LogDebug(BCLog::NET, "ignoring staletip headers from peer=%d: %s", pfrom.GetId(), state.ToString());
+        return;
+    }
+
+    LOCK(cs_main);
+    if (pindexLast != nullptr) (void)m_stale_tip_relay->AcceptedStaleTip(m_chainman.ActiveChain(), *pindexLast);
 }
 
 bool PeerManagerImpl::RejectIncomingTxs(const CNode& peer) const
