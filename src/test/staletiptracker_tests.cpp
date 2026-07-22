@@ -383,6 +383,7 @@ BOOST_AUTO_TEST_CASE(staletip_tracker_signet_requires_validated_block)
 
     CBlockIndex* headers_only{tree.Add(active->pprev, /*active=*/false)};
     StaleTipTracker tracker{ChainType::SIGNET};
+    BOOST_CHECK(tracker.CanRequestStaleTipBlock(tree.active_chain, *headers_only));
     BOOST_CHECK(!tracker.AddStaleTip(tree.active_chain, *headers_only));
 
     headers_only->RaiseValidity(BLOCK_VALID_TRANSACTIONS);

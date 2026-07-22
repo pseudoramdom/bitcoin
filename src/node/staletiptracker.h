@@ -127,6 +127,11 @@ public:
      * @return Whether the tracker was updated to track `stale_tip`.
      */
     bool AddStaleTip(const CChain& active_chain, const CBlockIndex& stale_tip) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    /** Whether the block data for `stale_tip` may be requested from a peer.
+     *  On signet, AddStaleTip() requires the block to have been validated;
+     *  requesting it is allowed before then, since the signet signature can
+     *  only be verified with the block data. */
+    bool CanRequestStaleTipBlock(const CChain& active_chain, const CBlockIndex& stale_tip) const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
     /** Whether `block` is stored on a tracked, still-eligible stale branch and
      *  may be served to a peer that negotiated stale-tip relay. */
     bool CanServeStaleBranchBlock(const CChain& active_chain, const CBlockIndex& block) const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
