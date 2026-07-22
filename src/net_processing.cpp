@@ -6483,6 +6483,18 @@ bool PeerManagerImpl::SendMessages(CNode& node)
                     }
                 }
             }
+            // Staletip peers infer which fork points we know from our active
+            // tip, so announce it even if they announced it to us first.
+            if (NegotiatedStaleTip(peer) && !peer.m_blocks_for_headers_relay.empty()) {
+                const CBlockIndex* tip{m_chainman.ActiveChain().Tip()};
+                if (peer.m_blocks_for_headers_relay.back() == tip->GetBlockHash() &&
+                    state.pindexBestHeaderSent != tip &&
+                    std::ranges::find(peer.m_blocks_for_inv_relay, tip->GetBlockHash()) == peer.m_blocks_for_inv_relay.end()) {
+                    peer.m_blocks_for_inv_relay.push_back(tip->GetBlockHash());
+                    LogDebug(BCLog::NET, "%s: sending active tip inv peer=%d hash=%s", __func__,
+                        node.GetId(), tip->GetBlockHash().ToString());
+                }
+            }
             peer.m_blocks_for_headers_relay.clear();
         }
 
