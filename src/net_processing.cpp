@@ -275,6 +275,9 @@ struct Peer {
      * Most peers use headers-first syncing, which doesn't use this mechanism */
     uint256 m_continuation_block GUARDED_BY(m_block_inv_mutex) {};
 
+    /** Recognised BIP 434 features this peer advertised. */
+    NetFeatures m_features GUARDED_BY(NetEventsInterface::g_msgproc_mutex);
+
     /** Set to true once initial VERSION message was sent (only relevant for outbound peers). */
     bool m_outbound_version_message_sent GUARDED_BY(NetEventsInterface::g_msgproc_mutex){false};
 
@@ -820,6 +823,9 @@ private:
         if (!Assume(feature_data.size() <= MAX_FEATUREDATA_LENGTH)) return;
         MakeAndPushMessage(node, NetMsgType::FEATURE, feature_id, std::move(feature_data));
     }
+
+    /** The BIP 434 features we advertise. */
+    NetFeatures LocalFeatures() const;
 
     /** Send a version message to a peer */
     void PushNodeVersion(CNode& pnode, const Peer& peer);
@@ -1990,6 +1996,19 @@ std::optional<std::vector<uint256>> PeerManagerImpl::GetRelayableStaleTips() con
         hashes.push_back(fork.tip.get().GetBlockHash());
     }
     return hashes;
+}
+
+NetFeatures PeerManagerImpl::LocalFeatures() const
+{
+    NetFeatures features;
+    if (StaleTipRelayEnabled()) {
+        // Signet stale tips can only be validated with the full block data
+        // containing the signature, so always prefer block availability there.
+        features.stale_tip = StaleTipFeature{
+            .prefers_blocks = m_chainparams.GetChainType() == ChainType::SIGNET,
+        };
+    }
+    return features;
 }
 
 PeerManagerInfo PeerManagerImpl::GetInfo() const
@@ -4039,8 +4058,10 @@ void PeerManagerImpl::ProcessMessage(Peer& peer, CNode& pfrom, const std::string
         }
 
         if (greatest_common_version >= FEATURE_VERSION) {
-            // announce supported features
-            // MakeAndPushFeature(pfrom, NetMsgFeature::FOO, uint32_t{1});
+            const NetFeatures local_features{LocalFeatures()};
+            if (local_features.stale_tip) {
+                MakeAndPushFeature(pfrom, NetMsgFeature::STALETIP, *local_features.stale_tip);
+            }
         }
 
         // If we have too many tx-relaying inbound peers, attempt to evict an existing one.
@@ -4295,10 +4316,17 @@ void PeerManagerImpl::ProcessMessage(Peer& peer, CNode& pfrom, const std::string
             return;
         }
 
-        // if (feature_id == NetMsgFeature::FOO) {
-        //     ...
-        //     return;
-        // }
+        if (feature_id == NetMsgFeature::STALETIP) {
+            const auto stale_tip{StaleTipFeature::Parse(feature_data)};
+            if (!stale_tip) {
+                LogDebug(BCLog::NET, "ignoring malformed %s feature data from peer=%d", NetMsgFeature::STALETIP, pfrom.GetId());
+                return;
+            }
+
+            peer.m_features.stale_tip = *stale_tip;
+            LogDebug(BCLog::NET, "peer=%d supports staletip announcements with prefers_blocks=%d", pfrom.GetId(), stale_tip->prefers_blocks);
+            return;
+        }
 
         // ignore unknown feature_id
         LogDebug(BCLog::NET, "unknown feature advertised: %s", SanitizeString(feature_id));
