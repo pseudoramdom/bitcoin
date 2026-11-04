@@ -5,6 +5,8 @@
 
 """Test stale-tip P2P relay."""
 
+from contextlib import nullcontext
+
 from test_framework.blocktools import create_block
 from test_framework.messages import (
     CBlockHeader,
@@ -144,21 +146,28 @@ class P2PStaleTipTest(BitcoinTestFramework):
             stale_features = [feature for feature in peer.features if feature.feature_id == STALETIP_FEATURE]
             if expected_data is None:
                 assert_equal(stale_features, [])
+                assert_equal(node.getnetworkinfo()["localfeatures"], {})
             else:
                 assert_equal(len(stale_features), 1)
                 assert_equal(stale_features[0].feature_data, expected_data)
+                assert_equal(node.getnetworkinfo()["localfeatures"],
+                             {STALETIP_FEATURE: {"prefers_blocks": expected_data == b"\x01"}})
             node.disconnect_p2ps()
 
         self.log.info("Test peer staletip feature negotiation")
         self.restart_node(0, extra_args=["-debug=net", "-peertimeout=999", "-staletips=headers"])
-        for feature_data, expected_log in [
-            (b"", "ignoring malformed BIP332 feature data"),
-            (b"\x02", "ignoring malformed BIP332 feature data"),
-            (b"\x00\x01", "ignoring malformed BIP332 feature data"),
+        for send_feature, feature_data, expected_log, expected_features in [
+            (True, b"\x00", None, {STALETIP_FEATURE: {"prefers_blocks": False}}),
+            (True, b"\x01", None, {STALETIP_FEATURE: {"prefers_blocks": True}}),
+            (False, b"\x00", None, {}),
+            (True, b"", "ignoring malformed BIP332 feature data", {}),
+            (True, b"\x02", "ignoring malformed BIP332 feature data", {}),
+            (True, b"\x00\x01", "ignoring malformed BIP332 feature data", {}),
         ]:
-            with node.assert_debug_log([expected_log], timeout=2):
-                peer = self.connect_peer(feature_data=feature_data)
-                peer.sync_with_ping()
+            with node.assert_debug_log([expected_log], timeout=2) if expected_log else nullcontext():
+                peer = self.connect_peer(send_feature=send_feature, feature_data=feature_data)
+            peer.sync_with_ping()
+            assert_equal(node.getpeerinfo()[0]["features"], expected_features)
             assert peer.is_connected
             node.disconnect_p2ps()
 
