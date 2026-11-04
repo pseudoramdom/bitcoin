@@ -272,6 +272,9 @@ public:
      *  a temporarily ineligible tip (for example, one reorged onto the active
      *  chain and back) is not re-announced once it becomes eligible again. */
     std::set<uint32_t> GetTrackedSeqnos() const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    /** Whether `tip` is retained in the cache, even if it is currently
+     *  ineligible for relay. */
+    bool IsTracked(const CBlockIndex* tip) const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 };
 
 #endif // BITCOIN_STALETIPS_H

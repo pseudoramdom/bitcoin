@@ -307,3 +307,9 @@ std::set<uint32_t> StaleTipCache::GetTrackedSeqnos() const
     }
     return seqnos;
 }
+
+bool StaleTipCache::IsTracked(const CBlockIndex* tip) const
+{
+    AssertLockHeld(::cs_main);
+    return tip != nullptr && std::ranges::any_of(m_tips, [&](const Entry& entry) { return entry.tip == tip; });
+}
