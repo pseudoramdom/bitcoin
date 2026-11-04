@@ -46,6 +46,7 @@ class P2PStaleTipTest(BitcoinTestFramework):
 
         self.restart_node(0, extra_args=["-debug=net", "-peertimeout=999", "-staletips=headers"])
         self.test_invalid_feature_data_ignored()
+        self.test_peer_features_reported()
         self.test_reorged_out_active_tip_tracked()
         self.test_startup_seeding_only_when_enabled()
 
@@ -105,9 +106,24 @@ class P2PStaleTipTest(BitcoinTestFramework):
             stale_features = [feature for feature in peer.features if feature.feature_id == STALETIP_FEATURE]
             if expected_data is None:
                 assert_equal(stale_features, [])
+                assert_equal(self.nodes[0].getnetworkinfo()["localfeatures"], {})
             else:
                 assert_equal(len(stale_features), 1)
                 assert_equal(stale_features[0].feature_data, expected_data)
+                assert_equal(self.nodes[0].getnetworkinfo()["localfeatures"],
+                             {STALETIP_FEATURE: {"prefers_blocks": expected_data == b"\x01"}})
+            self.nodes[0].disconnect_p2ps()
+
+    def test_peer_features_reported(self):
+        self.log.info("Test peer staletip features are reported by getpeerinfo")
+        for send_feature, feature_data, expected in [
+            (True, b"\x00", {STALETIP_FEATURE: {"prefers_blocks": False}}),
+            (True, b"\x01", {STALETIP_FEATURE: {"prefers_blocks": True}}),
+            (False, b"\x00", {}),
+        ]:
+            peer = self.connect_peer(send_feature=send_feature, feature_data=feature_data)
+            peer.sync_with_ping()
+            assert_equal(self.nodes[0].getpeerinfo()[0]["features"], expected)
             self.nodes[0].disconnect_p2ps()
 
     def test_invalid_feature_data_ignored(self):
@@ -122,6 +138,7 @@ class P2PStaleTipTest(BitcoinTestFramework):
                 peer = self.connect_peer(feature_data=feature_data)
                 peer.sync_with_ping()
             assert peer.is_connected
+            assert_equal(self.nodes[0].getpeerinfo()[0]["features"], {})
             self.nodes[0].disconnect_p2ps()
 
     def test_startup_seeding_only_when_enabled(self):
