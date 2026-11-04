@@ -608,6 +608,7 @@ public:
     bool GetNodeStateStats(NodeId nodeid, CNodeStateStats& stats) const override EXCLUSIVE_LOCKS_REQUIRED(!m_peer_mutex);
     std::vector<node::TxOrphanage::OrphanInfo> GetOrphanTransactions() override EXCLUSIVE_LOCKS_REQUIRED(!m_tx_download_mutex);
     PeerManagerInfo GetInfo() const override EXCLUSIVE_LOCKS_REQUIRED(!m_peer_mutex, !m_inv_to_send_mutex);
+    std::optional<std::vector<uint256>> GetRelayableStaleTips() const override;
     std::vector<PrivateBroadcast::TxBroadcastInfo> GetPrivateBroadcastInfo() const override EXCLUSIVE_LOCKS_REQUIRED(!m_peer_mutex);
     std::vector<CTransactionRef> AbortPrivateBroadcast(const uint256& id) override EXCLUSIVE_LOCKS_REQUIRED(!m_peer_mutex);
     void SendPings() override EXCLUSIVE_LOCKS_REQUIRED(!m_peer_mutex);
@@ -1967,6 +1968,17 @@ std::vector<node::TxOrphanage::OrphanInfo> PeerManagerImpl::GetOrphanTransaction
 {
     LOCK(m_tx_download_mutex);
     return m_txdownloadman.GetOrphanTransactions();
+}
+
+std::optional<std::vector<uint256>> PeerManagerImpl::GetRelayableStaleTips() const
+{
+    if (m_opts.stale_tip_mode == StaleTipMode::NONE) return std::nullopt;
+    LOCK(::cs_main);
+    std::vector<uint256> hashes;
+    for (const StaleFork& fork : m_stale_tips.GetStaleTips(m_chainman.ActiveChain())) {
+        hashes.push_back(fork.tip.get().GetBlockHash());
+    }
+    return hashes;
 }
 
 PeerManagerInfo PeerManagerImpl::GetInfo() const
