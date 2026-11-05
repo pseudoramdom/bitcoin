@@ -270,3 +270,9 @@ std::vector<StaleFork> StaleTipCache::GetStaleTips(const CChain& chain) const
 
     return tips;
 }
+
+bool StaleTipCache::IsTracked(const CBlockIndex* tip) const
+{
+    AssertLockHeld(::cs_main);
+    return tip != nullptr && std::ranges::any_of(m_tips, [&](const Entry& entry) { return entry.tip == tip; });
+}

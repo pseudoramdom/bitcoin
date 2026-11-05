@@ -242,6 +242,9 @@ public:
     /** Get the tracked tips that are eligible for relay, with their fork
      *  points, in the order they were added. */
     std::vector<StaleFork> GetStaleTips(const CChain& chain) const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    /** Whether `tip` is retained in the cache, even if it is currently
+     *  ineligible for relay. */
+    bool IsTracked(const CBlockIndex* tip) const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 };
 
 #endif // BITCOIN_STALETIPS_H

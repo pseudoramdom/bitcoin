@@ -43,7 +43,7 @@ inline constexpr bool DEFAULT_TXRECONCILIATION_ENABLE{false};
 enum class StaleTipMode {
     //! Stale-tip tracking disabled.
     NONE,
-    //! Track recent stale tips.
+    //! Track stale tips and announce them to peers once their headers are known.
     HEADERS,
 };
 /** Whether stale-tip relay should be enabled by default. */
