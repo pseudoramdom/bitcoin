@@ -1607,7 +1607,7 @@ static RPCMethod getchaintips()
                 " including the main chain as well as orphaned branches.\n",
                 {
                     {"max_depth", RPCArg::Type::NUM, RPCArg::DefaultHint{"all tips"}, "Only return tips at most this many blocks below the active tip. The active tip, and tips higher than it, are always returned."},
-                    {"staletips_only", RPCArg::Type::BOOL, RPCArg::Default{false}, "Only return the recent stale tips tracked for stale-tip relay (BIP 332), including tracked tips that a known block builds on. Requires -staletips."},
+                    {"staletips_only", RPCArg::Type::BOOL, RPCArg::Default{false}, "Only return the recent stale tips that are announced to peers that negotiated stale-tip relay (BIP 332), including tips that a known block builds on. Requires -staletips."},
                 },
                 RPCResult{
                     RPCResult::Type::ARR, "", "",
