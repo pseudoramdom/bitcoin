@@ -17,8 +17,10 @@
 #include <boost/test/unit_test.hpp>
 
 #include <cstddef>
+#include <functional>
 #include <initializer_list>
 #include <optional>
+#include <set>
 #include <vector>
 
 BOOST_FIXTURE_TEST_SUITE(staletiprelayman_tests, BasicTestingSetup)
@@ -38,11 +40,13 @@ struct TestPeer {
 };
 
 std::vector<StaleTipMessage> Announce(node::StaleTipRelayManager& manager, const CChain& chain, const TestPeer& peer,
-                                               std::optional<int> max_serve_depth = std::nullopt) EXCLUSIVE_LOCKS_REQUIRED(::cs_main)
+                                               std::optional<int> max_serve_depth = std::nullopt, bool prefers_blocks = false,
+                                               const std::set<uint256>& requested = {}) EXCLUSIVE_LOCKS_REQUIRED(::cs_main)
 {
     return manager.GetStaleTipsToAnnounce(
-        peer.id, chain, max_serve_depth,
-        [&](const CBlockIndex& block) { return peer.HasHeader(block); });
+        peer.id, chain, prefers_blocks, max_serve_depth,
+        [&](const CBlockIndex& block) { return peer.HasHeader(block); },
+        [&](const uint256& hash) { return requested.contains(hash); });
 }
 
 std::vector<uint256> Tips(const std::vector<StaleTipMessage>& announcements)
@@ -58,6 +62,10 @@ std::vector<uint256> Hashes(std::initializer_list<const CBlockIndex*> blocks)
     for (const CBlockIndex* block : blocks) hashes.push_back(block->GetBlockHash());
     return hashes;
 }
+
+bool NotRequested(const uint256&) { return false; }
+
+bool AnyBranch(const CBlockIndex&) { return true; }
 
 } // namespace
 
@@ -245,6 +253,122 @@ BOOST_AUTO_TEST_CASE(announces_servable_branches)
     const int first_depth{tree.active_chain.Height() - first->nHeight};
     BOOST_CHECK(have_block(first_depth));
     BOOST_CHECK(!have_block(first_depth - 1));
+}
+
+BOOST_AUTO_TEST_CASE(defers_while_downloading)
+{
+    LOCK(::cs_main);
+
+    BlockTree tree;
+    CBlockIndex* active{tree.Add(nullptr, true, true)};
+    for (int i{0}; i < 3; ++i) active = tree.Add(active, true, true);
+    CBlockIndex* tip{tree.Add(Assert(active->pprev), false)};
+    const std::set<uint256> requested{tip->GetBlockHash()};
+
+    node::StaleTipRelayManager headers_mode{{}};
+    node::StaleTipRelayManager blocks_mode{{.fetch_blocks = true}};
+    BOOST_CHECK(blocks_mode.PrefersBlocks());
+    for (auto* manager : {&headers_mode, &blocks_mode}) {
+        for (NodeId id{0}; id < 3; ++id) manager->ConnectedPeer(id);
+        BOOST_CHECK(manager->AcceptedStaleTip(tree.active_chain, *tip));
+    }
+
+    // In blocks mode, a peer that prefers blocks waits while the tip's block
+    // is being downloaded.
+    const TestPeer prefers{.id = 0, .best_known = active};
+    BOOST_CHECK(Announce(blocks_mode, tree.active_chain, prefers, std::nullopt, /*prefers_blocks=*/true, requested).empty());
+    BOOST_CHECK_EQUAL(Announce(blocks_mode, tree.active_chain, prefers, std::nullopt, /*prefers_blocks=*/true).size(), 1U);
+
+    // Other peers don't wait, nor does any peer in headers mode, nor once the
+    // block can be served.
+    const TestPeer indifferent{.id = 1, .best_known = active};
+    BOOST_CHECK_EQUAL(Announce(blocks_mode, tree.active_chain, indifferent, std::nullopt, /*prefers_blocks=*/false, requested).size(), 1U);
+    BOOST_CHECK_EQUAL(Announce(headers_mode, tree.active_chain, prefers, std::nullopt, /*prefers_blocks=*/true, requested).size(), 1U);
+    tip->nStatus |= BLOCK_HAVE_DATA;
+    tip->m_chain_tx_count = 1;
+    const TestPeer served{.id = 2, .best_known = active};
+    const auto announcements{Announce(blocks_mode, tree.active_chain, served, std::nullopt, /*prefers_blocks=*/true, requested)};
+    BOOST_REQUIRE_EQUAL(announcements.size(), 1U);
+    BOOST_CHECK(announcements.front().m_have_block);
+}
+
+BOOST_AUTO_TEST_CASE(branch_requests)
+{
+    LOCK(::cs_main);
+
+    BlockTree tree;
+    CBlockIndex* active{tree.Add(nullptr, true, true)};
+    for (int i{0}; i < 12; ++i) active = tree.Add(active, true, true);
+    std::vector<CBlockIndex*> branch{tree.Add(active->GetAncestor(2), false)};
+    while (branch.size() < 10) branch.push_back(tree.Add(branch.back(), false));
+    const CBlockIndex& tip{*branch.back()};
+    const CChain& chain{tree.active_chain};
+    const auto range{[&](size_t begin, size_t end) { return std::vector<const CBlockIndex*>(branch.begin() + begin, branch.begin() + end); }};
+
+    node::StaleTipRelayManager manager{{.fetch_blocks = true}};
+    manager.ConnectedPeer(0);
+    const auto request{[&](size_t in_flight, const std::function<bool(const uint256&)>& is_requested) EXCLUSIVE_LOCKS_REQUIRED(::cs_main) {
+        return manager.GetBlocksToRequest(0, chain, in_flight, is_requested, AnyBranch);
+    }};
+    const size_t cap{node::MAX_IN_TRANSIT_FOR_STALE_BRANCH_REQUESTS};
+
+    // Only branches offered with block data are requested.
+    manager.ReceivedStaleTip(0, chain, tip, /*have_block=*/false);
+    BOOST_CHECK(request(0, NotRequested).empty());
+    manager.ReceivedStaleTip(0, chain, tip, /*have_block=*/true);
+
+    // Parents first, up to the in-flight cap, which counts blocks already in
+    // flight from the peer.
+    BOOST_CHECK(request(0, NotRequested) == range(0, cap));
+    BOOST_CHECK(request(cap - 3, NotRequested) == range(0, 3));
+    BOOST_CHECK(request(cap, NotRequested).empty());
+
+    // Blocks we have, or that are in flight from any peer, are skipped.
+    branch[0]->nStatus |= BLOCK_HAVE_DATA;
+    const auto requested{[&](const uint256& hash) { return hash == branch[1]->GetBlockHash(); }};
+    BOOST_CHECK(request(0, requested) == range(2, 2 + cap));
+
+    // Nothing is requested in headers mode, or for an ineligible tip, here one
+    // on the active chain.
+    node::StaleTipRelayManager headers_mode{{}};
+    headers_mode.ConnectedPeer(0);
+    headers_mode.ReceivedStaleTip(0, chain, tip, /*have_block=*/true);
+    BOOST_CHECK(headers_mode.GetBlocksToRequest(0, chain, 0, NotRequested, AnyBranch).empty());
+    node::StaleTipRelayManager active_offer{{.fetch_blocks = true}};
+    active_offer.ConnectedPeer(0);
+    active_offer.ReceivedStaleTip(0, chain, *active, /*have_block=*/true);
+    BOOST_CHECK(active_offer.GetBlocksToRequest(0, chain, 0, NotRequested, AnyBranch).empty());
+}
+
+BOOST_AUTO_TEST_CASE(requests_across_offers)
+{
+    LOCK(::cs_main);
+
+    BlockTree tree;
+    CBlockIndex* active{tree.Add(nullptr, true, true)};
+    for (int i{0}; i < 5; ++i) active = tree.Add(active, true, true);
+    CBlockIndex* shared{tree.Add(active->GetAncestor(2), false)};
+    CBlockIndex* tip_a{tree.Add(shared, false)};
+    CBlockIndex* tip_b{tree.Add(shared, false)};
+    const CChain& chain{tree.active_chain};
+    using Blocks = std::vector<const CBlockIndex*>;
+
+    node::StaleTipRelayManager manager{{.fetch_blocks = true}};
+    manager.ConnectedPeer(0);
+    manager.ReceivedStaleTip(0, chain, *tip_a, /*have_block=*/true);
+    manager.ReceivedStaleTip(0, chain, *tip_b, /*have_block=*/true);
+
+    // Oldest offer first, and blocks the branches share only once.
+    BOOST_CHECK(manager.GetBlocksToRequest(0, chain, 0, NotRequested, AnyBranch) == Blocks({shared, tip_a, tip_b}));
+
+    // The in-flight cap applies across branches.
+    BOOST_CHECK(manager.GetBlocksToRequest(0, chain, node::MAX_IN_TRANSIT_FOR_STALE_BRANCH_REQUESTS - 2, NotRequested, AnyBranch) == Blocks({shared, tip_a}));
+
+    // Branches the peer cannot serve are skipped.
+    BOOST_CHECK(manager.GetBlocksToRequest(0, chain, 0, NotRequested, [&](const CBlockIndex& tip) { return &tip != tip_a; }) == Blocks({shared, tip_b}));
+
+    // Nothing is requested from an unknown peer.
+    BOOST_CHECK(manager.GetBlocksToRequest(1, chain, 0, NotRequested, AnyBranch).empty());
 }
 
 BOOST_AUTO_TEST_SUITE_END()
