@@ -242,6 +242,12 @@ void StaleTipTracker::Initialize(node::BlockManager& blockman, const CChain& cha
     }
 }
 
+bool StaleTipTracker::Empty() const
+{
+    AssertLockHeld(::cs_main);
+    return std::ranges::all_of(m_tips, [](const Entry& entry) { return entry.tip == nullptr; });
+}
+
 bool StaleTipTracker::AddStaleTip(const CChain& chain, const CBlockIndex* stale_tip)
 {
     AssertLockHeld(::cs_main);
@@ -275,4 +281,10 @@ std::vector<StaleFork> StaleTipTracker::GetStaleTips(const CChain& chain) const
     }
 
     return tips;
+}
+
+bool StaleTipTracker::IsTracked(const CBlockIndex* tip) const
+{
+    AssertLockHeld(::cs_main);
+    return tip != nullptr && std::ranges::any_of(m_tips, [&](const Entry& entry) { return entry.tip == tip; });
 }

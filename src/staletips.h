@@ -250,6 +250,9 @@ public:
      *  block index, scanning all block index entries. Called at startup. */
     void Initialize(node::BlockManager& blockman, const CChain& chain) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 
+    /** Whether no stale tips are currently retained. */
+    bool Empty() const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+
     /** Track `stale_tip` if it is eligible (see GetEligibleForkPoint() and
      *  BlockValidatedIfRequired()) and can be retained under the tracker's
      *  resource limits.
@@ -260,6 +263,9 @@ public:
     /** Get the tracked tips that are eligible for relay, with their fork
      *  points, in the order they were added. */
     std::vector<StaleFork> GetStaleTips(const CChain& chain) const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    /** Whether `tip` is tracked, even if it is currently
+     *  ineligible for relay. */
+    bool IsTracked(const CBlockIndex* tip) const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 };
 
 #endif // BITCOIN_STALETIPS_H

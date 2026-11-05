@@ -325,10 +325,12 @@ BOOST_AUTO_TEST_CASE(staletip_tracker_returns_tips_in_discovery_order)
     for (int i{0}; i < 4; ++i) active = tree.Add(active, true, true);
 
     StaleTipTracker tips;
+    BOOST_CHECK(tips.Empty());
     CBlockIndex* first{tree.Add(Assert(Assert(Assert(active->pprev)->pprev)->pprev), false)};
     CBlockIndex* second{tree.Add(Assert(Assert(active->pprev)->pprev), false)};
     BOOST_CHECK(tips.AddStaleTip(tree.active_chain, first));
     BOOST_CHECK(tips.AddStaleTip(tree.active_chain, second));
+    BOOST_CHECK(!tips.Empty());
 
     // Extending the first tip reuses its slot, but the extension was learned
     // last, so it is returned last.
