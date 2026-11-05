@@ -9,6 +9,7 @@
 
 #include <algorithm>
 #include <cassert>
+#include <ranges>
 
 namespace node {
 
@@ -87,9 +88,10 @@ bool StaleTipRelayManager::IsAnnouncedStaleBranchBlock(NodeId peer, const CChain
 }
 
 std::vector<StaleTipMessage> StaleTipRelayManager::GetStaleTipsToAnnounce(
-    NodeId peer, const CChain& chain,
+    NodeId peer, const CChain& chain, bool peer_prefers_blocks,
     const CanServeBlockFn& can_serve_block,
-    const PeerHasHeaderFn& peer_has_header)
+    const PeerHasHeaderFn& peer_has_header,
+    const IsRequestedFn& is_requested)
 {
     AssertLockHeld(::cs_main);
     const auto it{m_peers.find(peer)};
@@ -97,6 +99,7 @@ std::vector<StaleTipMessage> StaleTipRelayManager::GetStaleTipsToAnnounce(
     PeerInfo& info{it->second};
 
     std::vector<StaleTipMessage> announcements;
+    const bool defer_for_block{m_opts.fetch_blocks && peer_prefers_blocks};
     for (const StaleFork& fork : m_tracker.GetStaleTips(chain)) {
         const CBlockIndex& stale_tip{*fork.tip};
         // Don't announce a tip twice.
@@ -130,6 +133,18 @@ std::vector<StaleTipMessage> StaleTipRelayManager::GetStaleTipsToAnnounce(
         // peers may disconnect for announcements without it. Defer the
         // announcement until the block data can be served.
         if (!have_block && m_opts.chain_type == ChainType::SIGNET) continue;
+        // A peer that prefers block data waits while we are downloading the
+        // branch, as long as the download can let us serve it. The branch is
+        // fetched parents first, so the tip's block may not be requested yet.
+        // If nothing on the branch is downloading, there is nothing to wait
+        // for.
+        const auto downloading_branch{[&]() EXCLUSIVE_LOCKS_REQUIRED(::cs_main) {
+            for (const CBlockIndex* block{&stale_tip}; block != fork.fork_point; block = block->pprev) {
+                if (!(block->nStatus & BLOCK_HAVE_DATA) && is_requested(block->GetBlockHash())) return true;
+            }
+            return false;
+        }};
+        if (defer_for_block && !have_tip_data && within_serve_limits && downloading_branch()) continue;
         info.m_staletips_to_peer.insert(&stale_tip);
         announcements.push_back(MakeStaleTipMessage(fork, have_block));
     }
@@ -139,6 +154,51 @@ std::vector<StaleTipMessage> StaleTipRelayManager::GetStaleTipsToAnnounce(
     // become eligible again.
     std::erase_if(info.m_staletips_to_peer, [&](const CBlockIndex* tip) EXCLUSIVE_LOCKS_REQUIRED(::cs_main) { return !m_tracker.IsTracked(*tip); });
     return announcements;
+}
+
+void StaleTipRelayManager::AddStaleBranchBlocksToRequest(const CChain& chain, const CBlockIndex& tip, size_t in_flight,
+                                                         const IsRequestedFn& is_requested,
+                                                         std::vector<const CBlockIndex*>& blocks) const
+{
+    AssertLockHeld(::cs_main);
+    // Each branch is downloaded at most once. This stays true after the
+    // branch's blocks are pruned, so they are not downloaded again.
+    if (tip.HaveNumChainTxs()) return;
+    if (in_flight + blocks.size() >= MAX_IN_TRANSIT_FOR_STALE_BRANCH_REQUESTS) return;
+    if (!m_tracker.CanRequestStaleTipBlock(chain, tip)) return;
+
+    std::vector<const CBlockIndex*> missing_blocks;
+    for (const CBlockIndex* block{&tip}; block != nullptr && !chain.Contains(*block); block = block->pprev) {
+        if (block->nStatus & BLOCK_HAVE_DATA) continue;
+        if (is_requested(block->GetBlockHash())) continue;
+        // Branches may share blocks.
+        if (std::ranges::find(blocks, block) != blocks.end()) continue;
+        missing_blocks.push_back(block);
+    }
+
+    for (const CBlockIndex* block : missing_blocks | std::views::reverse) {
+        if (in_flight + blocks.size() >= MAX_IN_TRANSIT_FOR_STALE_BRANCH_REQUESTS) break;
+        blocks.push_back(block);
+    }
+}
+
+std::vector<const CBlockIndex*> StaleTipRelayManager::GetBlocksToRequest(
+    NodeId peer, const CChain& chain, size_t in_flight,
+    const IsRequestedFn& is_requested,
+    const CanFetchBranchFn& can_fetch_branch) const
+{
+    AssertLockHeld(::cs_main);
+    std::vector<const CBlockIndex*> blocks;
+    if (!m_opts.fetch_blocks) return blocks;
+    const auto it{m_peers.find(peer)};
+    if (it == m_peers.end()) return blocks;
+    for (const StaleTipAnnouncement& announced : it->second.m_staletips_from_peer) {
+        if (in_flight + blocks.size() >= MAX_IN_TRANSIT_FOR_STALE_BRANCH_REQUESTS) break;
+        if (!announced.have_block) continue;
+        if (!can_fetch_branch(*announced.tip)) continue;
+        AddStaleBranchBlocksToRequest(chain, *announced.tip, in_flight, is_requested, blocks);
+    }
+    return blocks;
 }
 
 bool StaleTipRelayManager::CanServeStaleBranchBlock(const CChain& chain, const CBlockIndex& block) const
@@ -155,7 +215,7 @@ std::vector<StaleFork> StaleTipRelayManager::GetStaleTips(const CChain& chain) c
 
 bool StaleTipRelayManager::PrefersBlocks() const
 {
-    return m_opts.chain_type == ChainType::SIGNET;
+    return m_opts.fetch_blocks || m_opts.chain_type == ChainType::SIGNET;
 }
 
 void StaleTipRelayManager::CheckIsEmpty() const

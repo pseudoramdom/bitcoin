@@ -46,6 +46,9 @@ enum class StaleTipRelayMode {
     NONE,
     //! Track and announce stale tips, and serve available stale branch blocks.
     HEADERS,
+    //! Additionally download stale tip block data, and prefer receiving
+    //! announcements from peers once they have block data available.
+    BLOCKS,
 };
 /** Default stale-tip relay mode. Stale-tip relay is opt-in. */
 inline constexpr StaleTipRelayMode DEFAULT_STALETIP_RELAY_MODE{StaleTipRelayMode::NONE};

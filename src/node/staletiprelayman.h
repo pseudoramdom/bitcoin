@@ -22,6 +22,7 @@
 
 class CBlockIndex;
 class CChain;
+class uint256;
 
 namespace node {
 class BlockManager;
@@ -30,6 +31,10 @@ class BlockManager;
  *  they are not announced back to it. Leaves room for a peer's
  *  MAX_ADVERTISED_STALETIPS previously known tips plus new ones. */
 inline constexpr size_t MAX_STALETIPS_FROM_PEER{2 * MAX_ADVERTISED_STALETIPS};
+/** Best-effort stale-branch blocks are only requested from a peer while fewer
+ *  than this many blocks are in flight from it, so they leave room for blocks
+ *  the active chain needs. Half of MAX_BLOCKS_IN_TRANSIT_PER_PEER. */
+inline constexpr size_t MAX_IN_TRANSIT_FOR_STALE_BRANCH_REQUESTS{8};
 
 /** Result of CheckStaleTipAnnouncement(). */
 enum class StaleTipAnnouncementResult {
@@ -50,22 +55,25 @@ StaleTipAnnouncementResult CheckStaleTipAnnouncement(const CBlockIndex& fork_poi
 
 struct StaleTipRelayOptions {
     ChainType chain_type{ChainType::MAIN};
+    //! Whether to download stale-branch blocks (-staletips=blocks).
+    bool fetch_blocks{false};
 };
 
 /**
- * Decides which stale tips to track and announce for BIP 332 stale-tip relay.
- * Owns the StaleTipTracker and, per peer, the stale tips the peer announced to
- * us and the ones we announced to it.
+ * Decides which stale tips to track, announce and fetch for BIP 332 stale-tip
+ * relay. Owns the StaleTipTracker and, per peer, the stale tips the peer
+ * announced to us and the ones we announced to it.
  *
  * It decides but does not act: PeerManager parses and validates `staletip`
- * messages, sends them, and serves blocks. What it knows about a peer is
- * passed in as callbacks that are only used during the call.
+ * messages, sends them, and owns block requests, timeouts and serving.
+ * Block-download state stays in PeerManager and is passed in as values, or as
+ * callbacks that are only used during the call.
  *
  * Caller needs to interact with StaleTipRelayManager:
  * - ValidationInterface callbacks.
  * - When a peer connects or disconnects.
  * - When a peer announces a stale tip.
- * - To get the stale tips to announce.
+ * - To get the stale tips to announce and the stale-branch blocks to request.
  *
  * This class is not thread-safe. Callers must hold cs_main.
  */
@@ -73,6 +81,8 @@ class StaleTipRelayManager
 {
 public:
     using PeerHasHeaderFn = std::function<bool(const CBlockIndex&)>;
+    using IsRequestedFn = std::function<bool(const uint256&)>;
+    using CanFetchBranchFn = std::function<bool(const CBlockIndex&)>;
     using CanServeBlockFn = std::function<bool(const CBlockIndex&)>;
 
     explicit StaleTipRelayManager(const StaleTipRelayOptions& opts);
@@ -110,14 +120,33 @@ public:
      * A tip is not announced twice, nor back to a peer that announced it to
      * us, nor to a peer that lacks its fork point or already has the tip.
      *
-     * @param[in] can_serve_block Whether our serving limits let the peer fetch
-     *                            a block, if we have it.
-     * @param[in] peer_has_header Whether the peer is known to have a header.
+     * @param[in] peer_prefers_blocks Whether the peer asked for announcements
+     *                                once we can serve the blocks.
+     * @param[in] can_serve_block     Whether our serving limits let the peer
+     *                                fetch a block, if we have it.
+     * @param[in] peer_has_header     Whether the peer is known to have a header.
+     * @param[in] is_requested        Whether a block is in flight from any peer.
      */
     std::vector<StaleTipMessage> GetStaleTipsToAnnounce(
-        NodeId peer, const CChain& chain,
+        NodeId peer, const CChain& chain, bool peer_prefers_blocks,
         const CanServeBlockFn& can_serve_block,
-        const PeerHasHeaderFn& peer_has_header) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+        const PeerHasHeaderFn& peer_has_header,
+        const IsRequestedFn& is_requested) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+
+    /** Choose the missing blocks to request from `peer` on the stale branches
+     *  it offered to serve, oldest offer first and parents first, without
+     *  reaching MAX_IN_TRANSIT_FOR_STALE_BRANCH_REQUESTS blocks in flight from
+     *  it.
+     *
+     * @param[in] in_flight        Number of blocks in flight from the peer.
+     * @param[in] is_requested     Whether a block is in flight from any peer.
+     * @param[in] can_fetch_branch Whether the peer can serve the blocks of the
+     *                             stale branch ending at a tip.
+     */
+    std::vector<const CBlockIndex*> GetBlocksToRequest(
+        NodeId peer, const CChain& chain, size_t in_flight,
+        const IsRequestedFn& is_requested,
+        const CanFetchBranchFn& can_fetch_branch) const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 
     /** Whether `block` is stored on a tracked, still-eligible stale branch and
      *  may be served to a peer that negotiated stale-tip relay. */
@@ -151,6 +180,11 @@ private:
         /** Tracked stale tips we announced to this peer. */
         std::set<const CBlockIndex*> m_staletips_to_peer;
     };
+
+    /** Append the blocks of `tip`'s branch to request to `blocks`. */
+    void AddStaleBranchBlocksToRequest(const CChain& chain, const CBlockIndex& tip, size_t in_flight,
+                                       const IsRequestedFn& is_requested,
+                                       std::vector<const CBlockIndex*>& blocks) const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 
     const StaleTipRelayOptions m_opts;
     StaleTipTracker m_tracker GUARDED_BY(::cs_main);
