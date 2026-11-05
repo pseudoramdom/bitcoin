@@ -22,6 +22,7 @@ std::optional<StaleTipRelayMode> ParseStaleTipRelayMode(std::string_view mode)
 {
     if (mode == "none") return StaleTipRelayMode::NONE;
     if (mode == "headers") return StaleTipRelayMode::HEADERS;
+    if (mode == "blocks") return StaleTipRelayMode::BLOCKS;
     return std::nullopt;
 }
 } // namespace
@@ -35,7 +36,7 @@ util::Result<void> ApplyArgsManOptions(const ArgsManager& argsman, PeerManager::
     } else if (auto value{argsman.GetArg("-staletips")}) {
         const auto mode{ParseStaleTipRelayMode(*value)};
         if (!mode) {
-            return util::Error{strprintf(_("Invalid value for -staletips=<mode>: '%s'. Expected one of 'none' or 'headers'."), *value)};
+            return util::Error{strprintf(_("Invalid value for -staletips=<mode>: '%s'. Expected one of 'none', 'headers', or 'blocks'."), *value)};
         }
         options.stale_tip_relay_mode = *mode;
     }
