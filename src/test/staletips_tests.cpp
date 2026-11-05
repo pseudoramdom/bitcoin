@@ -292,6 +292,33 @@ BOOST_AUTO_TEST_CASE(staletip_cache_basic)
     BOOST_CHECK_EQUAL(ForkLength(forks[0]), 1);
 }
 
+BOOST_AUTO_TEST_CASE(staletip_cache_returns_tips_in_discovery_order)
+{
+    LOCK(::cs_main);
+
+    BlockTree tree;
+    CBlockIndex* active{tree.Add(nullptr, true, true)};
+    for (int i{0}; i < 4; ++i) active = tree.Add(active, true, true);
+
+    StaleTipCache tips;
+    BOOST_CHECK(tips.Empty());
+    CBlockIndex* first{tree.Add(Assert(Assert(Assert(active->pprev)->pprev)->pprev), false)};
+    CBlockIndex* second{tree.Add(Assert(Assert(active->pprev)->pprev), false)};
+    BOOST_CHECK(tips.AddStaleTip(tree.active_chain, first));
+    BOOST_CHECK(tips.AddStaleTip(tree.active_chain, second));
+    BOOST_CHECK(!tips.Empty());
+
+    // Extending the first tip reuses its slot, but the extension was learned
+    // last, so it is returned last.
+    CBlockIndex* first_child{tree.Add(first, false)};
+    BOOST_CHECK(tips.AddStaleTip(tree.active_chain, first_child));
+
+    const auto forks{tips.GetStaleTips(tree.active_chain)};
+    BOOST_REQUIRE_EQUAL(forks.size(), 2U);
+    BOOST_CHECK_EQUAL(&forks[0].tip.get(), second);
+    BOOST_CHECK_EQUAL(&forks[1].tip.get(), first_child);
+}
+
 BOOST_AUTO_TEST_CASE(staletip_cache_policy)
 {
     LOCK(::cs_main);

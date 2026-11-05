@@ -227,6 +227,12 @@ void StaleTipCache::Initialize(node::BlockManager& blockman, const CChain& chain
     }
 }
 
+bool StaleTipCache::Empty() const
+{
+    AssertLockHeld(::cs_main);
+    return std::ranges::all_of(m_tips, [](const Entry& entry) { return entry.tip == nullptr; });
+}
+
 bool StaleTipCache::AddStaleTip(const CChain& chain, const CBlockIndex* stale_tip)
 {
     AssertLockHeld(::cs_main);
@@ -245,14 +251,21 @@ std::vector<StaleFork> StaleTipCache::GetStaleTips(const CChain& chain) const
 {
     AssertLockHeld(::cs_main);
 
-    std::vector<StaleFork> tips;
-    tips.reserve(m_tips.size());
-
+    // Slots are reused, so sort by sequence number to return tips in the
+    // order they were added.
+    std::vector<const Entry*> entries;
+    entries.reserve(m_tips.size());
     for (const auto& entry : m_tips) {
-        if (entry.tip == nullptr) continue;
-        const CBlockIndex* fork_point{GetEligibleForkPoint(chain, *entry.tip)};
+        if (entry.tip != nullptr) entries.push_back(&entry);
+    }
+    std::ranges::sort(entries, {}, [](const Entry* entry) { return entry->seqno; });
+
+    std::vector<StaleFork> tips;
+    tips.reserve(entries.size());
+    for (const Entry* entry : entries) {
+        const CBlockIndex* fork_point{GetEligibleForkPoint(chain, *entry->tip)};
         if (fork_point == nullptr) continue;
-        tips.push_back({.fork_point = *fork_point, .tip = *entry.tip});
+        tips.push_back({.fork_point = *fork_point, .tip = *entry->tip});
     }
 
     return tips;

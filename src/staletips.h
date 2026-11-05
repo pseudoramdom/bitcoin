@@ -230,13 +230,17 @@ public:
      *  block index, scanning all block index entries. Called at startup. */
     void Initialize(node::BlockManager& blockman, const CChain& chain) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 
+    /** Whether no stale tips are currently retained. */
+    bool Empty() const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+
     /** Track `stale_tip` if it is eligible (see GetEligibleForkPoint()) and can
      *  be retained under the cache's resource limits.
      *
      * @return Whether the cache was updated to track `stale_tip`.
      */
     bool AddStaleTip(const CChain& chain, const CBlockIndex* stale_tip) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
-    /** Get the tracked tips that are eligible for relay, with their fork points. */
+    /** Get the tracked tips that are eligible for relay, with their fork
+     *  points, in the order they were added. */
     std::vector<StaleFork> GetStaleTips(const CChain& chain) const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 };
 
