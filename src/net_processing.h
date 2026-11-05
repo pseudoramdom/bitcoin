@@ -45,6 +45,9 @@ enum class StaleTipMode {
     NONE,
     //! Track and announce stale tips, and serve available stale branch blocks.
     HEADERS,
+    //! Additionally download stale tip block data, and prefer receiving
+    //! announcements from peers once they have block data available.
+    BLOCKS,
 };
 /** Whether stale-tip relay should be enabled by default. */
 inline constexpr StaleTipMode DEFAULT_STALETIP_MODE{StaleTipMode::NONE};
@@ -108,7 +111,7 @@ public:
         bool ignore_incoming_txs{DEFAULT_BLOCKSONLY};
         //! Whether transaction reconciliation protocol is enabled
         bool reconcile_txs{DEFAULT_TXRECONCILIATION_ENABLE};
-        //! Which stale tips to track (-staletips).
+        //! Whether stale-tip relay is enabled and which stale-tip data we prefer.
         StaleTipMode stale_tip_mode{DEFAULT_STALETIP_MODE};
         //! Number of non-mempool transactions to keep around for block reconstruction. Includes
         //! orphan, replaced, and rejected transactions.

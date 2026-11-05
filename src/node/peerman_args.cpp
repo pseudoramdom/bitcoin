@@ -19,6 +19,7 @@ std::optional<StaleTipMode> ParseStaleTipMode(std::string_view mode)
 {
     if (mode == "none") return StaleTipMode::NONE;
     if (mode == "headers") return StaleTipMode::HEADERS;
+    if (mode == "blocks") return StaleTipMode::BLOCKS;
     return std::nullopt;
 }
 

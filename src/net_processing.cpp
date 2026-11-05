@@ -892,8 +892,11 @@ private:
 
     void ProcessStaleTip(CNode& pfrom, Peer& peer, DataStream& vRecv) EXCLUSIVE_LOCKS_REQUIRED(g_msgproc_mutex);
 
-    /** Add a stale tip to the cache and update peer state if appropriate. */
+    /** Add a stale tip to the cache and request missing branch blocks if appropriate. */
     void HandleStaleTip(CNode& pfrom, Peer& peer, const CBlockIndex* pindex, bool peer_has_block, bool received_new_header) EXCLUSIVE_LOCKS_REQUIRED(g_msgproc_mutex, cs_main);
+
+    /** Request a stale tip's missing branch blocks from a peer that has them. */
+    void RequestStaleBranchBlocks(CNode& pfrom, const Peer& peer, const CBlockIndex& tip) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
 
     FastRandomContext m_rng GUARDED_BY(NetEventsInterface::g_msgproc_mutex);
 
@@ -1197,7 +1200,7 @@ private:
      * about and we fully-validated them at some point.
      */
     bool BlockRequestAllowed(const CBlockIndex& block_index) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
-    /** Whether this negotiated peer may fetch a tracked stale branch block. */
+    /** Whether this negotiated peer may fetch an unvalidated tracked stale-tip branch block. */
     bool StaleTipBlockRequestAllowed(const Peer& peer, const CBlockIndex& block_index) EXCLUSIVE_LOCKS_REQUIRED(g_msgproc_mutex, cs_main);
     /** Whether a block is too deep to serve to this peer, because we only
      *  signal NODE_NETWORK_LIMITED and serving it would leak our prune height. */
@@ -2096,7 +2099,8 @@ NetFeatures PeerManagerImpl::LocalFeatures() const
         // Signet stale tips can only be validated with the full block data
         // containing the signature, so always prefer block availability there.
         features.stale_tip = StaleTipFeature{
-            .prefers_blocks = m_chainparams.GetChainType() == ChainType::SIGNET,
+            .prefers_blocks = m_opts.stale_tip_mode == StaleTipMode::BLOCKS ||
+                              m_chainparams.GetChainType() == ChainType::SIGNET,
         };
     }
     return features;
@@ -6073,6 +6077,7 @@ void PeerManagerImpl::MaybeSendStaleTips(CNode& node, Peer& peer, CNodeState& st
 
     ProcessBlockAvailability(node.GetId());
 
+    const bool want_blocks{m_opts.stale_tip_mode == StaleTipMode::BLOCKS && stale_tip_feature->prefers_blocks};
     for (const StaleFork& fork : m_stale_tips.GetStaleTips(m_chainman.ActiveChain())) {
         const CBlockIndex& stale_tip{fork.tip.get()};
         // Don't announce a tip twice.
@@ -6097,6 +6102,10 @@ void PeerManagerImpl::MaybeSendStaleTips(CNode& node, Peer& peer, CNodeState& st
         // peers may disconnect for announcements without it. Defer the
         // announcement until the block data can be served.
         if (!have_block && m_chainparams.GetChainType() == ChainType::SIGNET) continue;
+        // A peer that prefers block data waits while we are downloading the
+        // tip's block. If nothing is downloading it, there is nothing to wait
+        // for.
+        if (want_blocks && !have_block && IsBlockRequested(stale_tip.GetBlockHash())) continue;
         StaleTipMessage data{fork, have_block};
         MakeAndPushMessage(node, NetMsgType::STALETIP, data);
         peer.m_stale_tips_to_peer.insert(&stale_tip);
@@ -6202,9 +6211,45 @@ void PeerManagerImpl::HandleStaleTip(CNode& pfrom, Peer& peer, const CBlockIndex
     }
 
     if (m_chainman.ActiveChain().Contains(*pindex)) return;
-    const bool added{m_stale_tips.AddStaleTip(m_chainman.ActiveChain(), pindex)};
-    if (added) {
-        m_connman.WakeMessageHandler();
+    TrackStaleTip(pindex);
+    if (peer_has_block) RequestStaleBranchBlocks(pfrom, peer, *pindex);
+}
+
+void PeerManagerImpl::RequestStaleBranchBlocks(CNode& pfrom, const Peer& peer, const CBlockIndex& tip)
+{
+    AssertLockHeld(cs_main);
+
+    if (m_opts.stale_tip_mode != StaleTipMode::BLOCKS) return;
+    if (!m_stale_tips.CanRequestStaleTipBlock(m_chainman.ActiveChain(), &tip)) return;
+    if (!CanServeBlocks(peer)) return;
+    if (!CanServeWitnesses(peer) &&
+        DeploymentActiveAt(tip, m_chainman, Consensus::DEPLOYMENT_SEGWIT)) return;
+    if (m_chainman.m_blockman.LoadingBlocks()) return;
+
+    CNodeState* state{State(pfrom.GetId())};
+    if (state == nullptr) return;
+
+    std::vector<CInv> getdata;
+    std::vector<const CBlockIndex*> missing_blocks;
+    const uint32_t fetch_flags{GetFetchFlags(peer)};
+
+    for (const CBlockIndex* block{&tip}; block != nullptr && !m_chainman.ActiveChain().Contains(*block); block = block->pprev) {
+        if (block->nStatus & BLOCK_HAVE_DATA) continue;
+
+        if (IsBlockRequested(block->GetBlockHash())) continue;
+
+        missing_blocks.push_back(block);
+    }
+
+    for (const CBlockIndex* block : missing_blocks | std::views::reverse) {
+        if (state->vBlocksInFlight.size() >= MAX_BLOCKS_IN_TRANSIT_PER_PEER) break;
+        getdata.emplace_back(MSG_BLOCK | fetch_flags, block->GetBlockHash());
+        BlockRequested(pfrom.GetId(), *block, /*pit=*/nullptr, BlockRequestType::BEST_EFFORT);
+        LogDebug(BCLog::NET, "requesting stale branch block %s from peer=%d", block->GetBlockHash().ToString(), pfrom.GetId());
+    }
+
+    if (!getdata.empty()) {
+        MakeAndPushMessage(pfrom, NetMsgType::GETDATA, getdata);
     }
 }
 
