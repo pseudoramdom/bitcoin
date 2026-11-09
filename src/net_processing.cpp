@@ -920,6 +920,15 @@ private:
         return peer.GetFeatures().stale_tip;
     }
 
+    /** Whether `hash` is on a stale branch this peer announced with have_block
+     *  set, so it may serve the branch's blocks without having connected them. */
+    bool IsAnnouncedStaleBranchBlock(NodeId peer, const uint256& hash) const EXCLUSIVE_LOCKS_REQUIRED(cs_main)
+    {
+        if (!m_staletiprelayman) return false;
+        const CBlockIndex* block_index{m_chainman.m_blockman.LookupBlockIndex(hash)};
+        return block_index != nullptr && m_staletiprelayman->IsAnnouncedStaleBranchBlock(peer, m_chainman.ActiveChain(), *block_index);
+    }
+
     node::Warnings& m_warnings;
     TimeOffsets m_outbound_time_offsets{m_warnings};
 
@@ -5249,10 +5258,13 @@ void PeerManagerImpl::ProcessMessage(Peer& peer, CNode& pfrom, const std::string
             // need it even when it's not a candidate for a new best tip.
             forceProcessing = IsBlockRequested(hash);
             RemoveBlockRequest(hash, pfrom.GetId());
+            // BIP 332 lets a peer serve blocks on a stale branch it announced
+            // without having connected them. As for BIP 152 compact blocks,
+            // don't punish the peer if such a block turns out to be invalid.
             // mapBlockSource is only used for punishing peers and setting
             // which peers send us compact blocks, so the race between here and
             // cs_main in ProcessNewBlock is fine.
-            mapBlockSource.emplace(hash, std::make_pair(pfrom.GetId(), true));
+            mapBlockSource.emplace(hash, std::make_pair(pfrom.GetId(), !IsAnnouncedStaleBranchBlock(pfrom.GetId(), hash)));
 
             // Check claimed work on this block against our anti-dos thresholds.
             if (prev_block && prev_block->nChainWork + GetBlockProof(*pblock) >= GetAntiDoSWorkThreshold()) {
@@ -6108,7 +6120,7 @@ void PeerManagerImpl::HandleStaleTip(CNode& pfrom, Peer& peer, const CBlockIndex
 
     // A known-invalid tip must not advance the peer's header state.
     if (!tip.IsValid(BLOCK_VALID_TREE)) return;
-    if (m_staletiprelayman->ReceivedStaleTip(pfrom.GetId(), m_chainman.ActiveChain(), tip)) {
+    if (m_staletiprelayman->ReceivedStaleTip(pfrom.GetId(), m_chainman.ActiveChain(), tip, peer_has_block)) {
         m_connman.WakeMessageHandler();
     }
 

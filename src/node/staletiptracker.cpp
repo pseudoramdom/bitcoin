@@ -22,12 +22,6 @@ namespace {
  *  difficulty of about 1,000,000 (2^20), the example threshold in BIP 332. */
 constexpr uint256 TESTNET_MAX_TARGET{"0000000000000fffffffffffffffffffffffffffffffffffffffffffffffffff"};
 
-/** Whether `ancestor` is an ancestor of `block`, or `block` itself. */
-bool HasAncestor(const CBlockIndex& block, const CBlockIndex& ancestor)
-{
-    return block.nHeight >= ancestor.nHeight && block.GetAncestor(ancestor.nHeight) == &ancestor;
-}
-
 /** Whether `block` is a header variant of the block at its height on the
  *  branch ending at `branch_tip`: both have the same previous block and merkle
  *  root. A block is a variant of itself. On signet, varying nBits can turn a
@@ -41,6 +35,11 @@ bool IsVariantOnBranch(const CBlockIndex& block, const CBlockIndex& branch_tip)
 }
 
 } // namespace
+
+bool HasAncestor(const CBlockIndex& block, const CBlockIndex& ancestor)
+{
+    return block.nHeight >= ancestor.nHeight && block.GetAncestor(ancestor.nHeight) == &ancestor;
+}
 
 StaleTipMessage MakeStaleTipMessage(const StaleFork& fork, bool have_block)
 {
