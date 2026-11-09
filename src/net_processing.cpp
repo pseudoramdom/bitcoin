@@ -293,9 +293,16 @@ struct Peer {
         return WITH_LOCK(m_features_mutex, return m_features);
     }
 
+    /** A stale tip this peer announced to us. */
+    struct StaleTipAnnouncement {
+        const CBlockIndex* tip;
+        //! Whether the peer offered to serve the blocks on the tip's branch. It
+        //! may not have connected them, so their scripts may be unchecked.
+        bool have_block;
+    };
     /** Stale tips this peer announced to us, oldest first. Kept independently
      *  of our cache, so tips we don't track (yet) are remembered too. */
-    std::deque<const CBlockIndex*> m_stale_tips_from_peer GUARDED_BY(NetEventsInterface::g_msgproc_mutex);
+    std::deque<StaleTipAnnouncement> m_stale_tips_from_peer GUARDED_BY(NetEventsInterface::g_msgproc_mutex);
     /** Tracked stale tips we announced to this peer. */
     std::set<const CBlockIndex*> m_stale_tips_to_peer GUARDED_BY(NetEventsInterface::g_msgproc_mutex);
 
@@ -935,6 +942,17 @@ private:
     {
         if (!StaleTipRelayEnabled()) return std::nullopt;
         return peer.GetFeatures().stale_tip;
+    }
+
+    /** Whether `hash` is on a stale branch this peer announced with have_block
+     *  set, so it may serve the branch's blocks without having connected them. */
+    bool IsAnnouncedStaleBranchBlock(const Peer& peer, const uint256& hash) const EXCLUSIVE_LOCKS_REQUIRED(NetEventsInterface::g_msgproc_mutex, cs_main)
+    {
+        if (peer.m_stale_tips_from_peer.empty()) return false;
+        const CBlockIndex* block_index{m_chainman.m_blockman.LookupBlockIndex(hash)};
+        return block_index != nullptr && std::ranges::any_of(peer.m_stale_tips_from_peer, [&](const Peer::StaleTipAnnouncement& announced) {
+            return announced.have_block && announced.tip->GetAncestor(block_index->nHeight) == block_index;
+        });
     }
 
     node::Warnings& m_warnings;
@@ -5251,10 +5269,13 @@ void PeerManagerImpl::ProcessMessage(Peer& peer, CNode& pfrom, const std::string
             // need it even when it's not a candidate for a new best tip.
             forceProcessing = IsBlockRequested(hash);
             RemoveBlockRequest(hash, pfrom.GetId());
+            // BIP 332 lets a peer serve blocks on a stale branch it announced
+            // without having connected them. As for BIP 152 compact blocks,
+            // don't punish the peer if such a block turns out to be invalid.
             // mapBlockSource is only used for punishing peers and setting
             // which peers send us compact blocks, so the race between here and
             // cs_main in ProcessNewBlock is fine.
-            mapBlockSource.emplace(hash, std::make_pair(pfrom.GetId(), true));
+            mapBlockSource.emplace(hash, std::make_pair(pfrom.GetId(), !IsAnnouncedStaleBranchBlock(peer, hash)));
 
             // Check claimed work on this block against our anti-dos thresholds.
             if (prev_block && prev_block->nChainWork + GetBlockProof(*pblock) >= GetAntiDoSWorkThreshold()) {
@@ -6007,7 +6028,7 @@ void PeerManagerImpl::MaybeSendStaleTips(CNode& node, Peer& peer, CNodeState& st
         // Don't announce a tip twice.
         if (peer.m_stale_tips_to_peer.contains(&stale_tip)) continue;
         // Don't announce a tip back to the peer that announced it to us.
-        if (std::ranges::find(peer.m_stale_tips_from_peer, &stale_tip) != peer.m_stale_tips_from_peer.end()) continue;
+        if (std::ranges::find(peer.m_stale_tips_from_peer, &stale_tip, &Peer::StaleTipAnnouncement::tip) != peer.m_stale_tips_from_peer.end()) continue;
         // The compressed payload reconstructs headers from the fork point, so
         // only announce tips whose fork point the peer is known to have.
         if (!PeerHasHeader(&state, &fork.fork_point.get())) continue;
@@ -6111,9 +6132,11 @@ void PeerManagerImpl::HandleStaleTip(CNode& pfrom, Peer& peer, const CBlockIndex
     if (pindex == nullptr) return;
     // A known-invalid tip must not advance the peer's header state.
     if (!pindex->IsValid(BLOCK_VALID_TREE)) return;
-    if (std::ranges::find(peer.m_stale_tips_from_peer, pindex) == peer.m_stale_tips_from_peer.end()) {
+    if (auto announced{std::ranges::find(peer.m_stale_tips_from_peer, pindex, &Peer::StaleTipAnnouncement::tip)}; announced != peer.m_stale_tips_from_peer.end()) {
+        announced->have_block |= peer_has_block;
+    } else {
         if (peer.m_stale_tips_from_peer.size() >= MAX_STALETIPS_FROM_PEER) peer.m_stale_tips_from_peer.pop_front();
-        peer.m_stale_tips_from_peer.push_back(pindex);
+        peer.m_stale_tips_from_peer.push_back({.tip = pindex, .have_block = peer_has_block});
     }
 
     const CBlockIndex* active_tip{m_chainman.ActiveTip()};

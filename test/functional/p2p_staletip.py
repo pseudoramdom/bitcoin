@@ -11,9 +11,14 @@ from test_framework.blocktools import create_block
 from test_framework.messages import (
     CBlockHeader,
     CInv,
+    COutPoint,
+    CTransaction,
+    CTxIn,
+    CTxOut,
     MSG_BLOCK,
     MSG_TYPE_MASK,
     StaleTipCompressedHeader,
+    msg_block,
     msg_feature,
     msg_getheaders,
     msg_headers,
@@ -22,6 +27,7 @@ from test_framework.messages import (
     msg_staletip,
 )
 from test_framework.p2p import P2PInterface
+from test_framework.script import CScript, OP_TRUE
 from test_framework.test_framework import BitcoinTestFramework
 from test_framework.util import (
     assert_equal,
@@ -117,6 +123,7 @@ class P2PStaleTipTest(BitcoinTestFramework):
         self.test_active_tip_announced_to_source_peer()
         self.test_no_reannouncement_after_transient_ineligibility()
         self.test_higher_work_staletip_requests_block()
+        self.test_invalid_stale_branch_block_not_punished()
         self.test_inbound_staletip_handling()
         self.test_startup_seeding_only_when_enabled()
 
@@ -416,6 +423,28 @@ class P2PStaleTipTest(BitcoinTestFramework):
             if inv.type & MSG_TYPE_MASK == MSG_BLOCK
         ], [])
         self.nodes[0].disconnect_p2ps()
+
+    def test_invalid_stale_branch_block_not_punished(self):
+        self.log.info("Test a peer is not disconnected for serving an invalid block on a branch it announced")
+        node = self.nodes[0]
+        peer = self.connect_peer(feature_data=b"\x00")
+        block, fork_point_hash = self.active_block()
+        # Spending a missing output passes the checks done before a block is
+        # stored, but fails once the block is connected.
+        tx = CTransaction()
+        tx.vin.append(CTxIn(COutPoint(0xdead, 0)))
+        tx.vout.append(CTxOut(0, CScript([OP_TRUE])))
+        block.vtx.append(tx)
+        block.hashMerkleRoot = block.calc_merkle_root()
+        block.solve()
+
+        peer.send_and_ping(self.staletip_msg(block, fork_point_hash, have_block=True))
+        peer.wait_for_getdata_hash(block.hash_int)
+        peer.send_without_ping(msg_block(block))
+        self.wait_until(lambda: any(tip["hash"] == block.hash_hex and tip["status"] == "invalid" for tip in node.getchaintips()))
+        peer.sync_with_ping()
+        assert peer.is_connected
+        node.disconnect_p2ps()
 
     def test_active_tip_announced_to_source_peer(self):
         self.log.info("Test active tip is announced to staletip peers that announced it first, but not to other peers")
