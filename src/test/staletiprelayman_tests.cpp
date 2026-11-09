@@ -81,7 +81,7 @@ BOOST_AUTO_TEST_CASE(announcement_policy)
     const TestPeer has_tip{.id = 3, .best_known = tip_a};
     for (NodeId id{0}; id < 4; ++id) manager.ConnectedPeer(id);
 
-    BOOST_CHECK(manager.ReceivedStaleTip(source.id, chain, *tip_a));
+    BOOST_CHECK(manager.ReceivedStaleTip(source.id, chain, *tip_a, /*have_block=*/false));
     BOOST_CHECK(manager.AcceptedStaleTip(chain, *tip_b));
     BOOST_CHECK(!manager.AcceptedStaleTip(chain, *tip_b));
 
@@ -112,7 +112,7 @@ BOOST_AUTO_TEST_CASE(announcement_policy)
     // Only the last MAX_STALETIPS_FROM_PEER tips a peer announced are
     // remembered, so an older one may be announced back to it.
     for (size_t i{0}; i < node::MAX_STALETIPS_FROM_PEER; ++i) {
-        manager.ReceivedStaleTip(source.id, chain, *tree.Add(fork_a, false));
+        manager.ReceivedStaleTip(source.id, chain, *tree.Add(fork_a, false), /*have_block=*/false);
     }
     BOOST_CHECK(Tips(Announce(manager, chain, source)) == Hashes({tip_a}));
 
@@ -151,7 +151,7 @@ BOOST_AUTO_TEST_CASE(evicted_tip_not_readmitted)
 
     // Another peer announcing the evicted tip cannot readmit it, so it is not
     // announced again.
-    BOOST_CHECK(!manager.ReceivedStaleTip(1, tree.active_chain, *tips.front()));
+    BOOST_CHECK(!manager.ReceivedStaleTip(1, tree.active_chain, *tips.front(), /*have_block=*/false));
     BOOST_CHECK(Announce(manager, tree.active_chain, peer).empty());
 }
 
@@ -177,6 +177,40 @@ BOOST_AUTO_TEST_CASE(signet_announces_with_block)
     BOOST_REQUIRE_EQUAL(announcements.size(), 1U);
     BOOST_CHECK(announcements.front().m_have_block);
     manager.DisconnectedPeer(peer.id);
+}
+
+BOOST_AUTO_TEST_CASE(announced_branch_blocks)
+{
+    LOCK(::cs_main);
+
+    BlockTree tree;
+    CBlockIndex* active{tree.Add(nullptr, true, true)};
+    for (int i{0}; i < 4; ++i) active = tree.Add(active, true, true);
+    CBlockIndex* fork{Assert(active->pprev)};
+    CBlockIndex* parent{tree.Add(fork, false)};
+    CBlockIndex* tip{tree.Add(parent, false)};
+    CBlockIndex* other{tree.Add(fork, false)};
+
+    node::StaleTipRelayManager manager{{}};
+    manager.ConnectedPeer(0);
+    manager.ConnectedPeer(1);
+
+    // Only a branch announced with block data counts.
+    manager.ReceivedStaleTip(0, tree.active_chain, *tip, /*have_block=*/false);
+    BOOST_CHECK(!manager.IsAnnouncedStaleBranchBlock(0, *tip));
+    manager.ReceivedStaleTip(0, tree.active_chain, *tip, /*have_block=*/true);
+    BOOST_CHECK(manager.IsAnnouncedStaleBranchBlock(0, *tip));
+    BOOST_CHECK(manager.IsAnnouncedStaleBranchBlock(0, *parent));
+    BOOST_CHECK(!manager.IsAnnouncedStaleBranchBlock(0, *other));
+    BOOST_CHECK(!manager.IsAnnouncedStaleBranchBlock(1, *tip));
+
+    // Announcing the tip again without block data keeps the offer.
+    manager.ReceivedStaleTip(0, tree.active_chain, *tip, /*have_block=*/false);
+    BOOST_CHECK(manager.IsAnnouncedStaleBranchBlock(0, *tip));
+
+    manager.DisconnectedPeer(0);
+    manager.DisconnectedPeer(1);
+    BOOST_CHECK(!manager.IsAnnouncedStaleBranchBlock(0, *tip));
 }
 
 BOOST_AUTO_TEST_SUITE_END()
