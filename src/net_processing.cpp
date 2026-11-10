@@ -1184,6 +1184,9 @@ private:
      * about and we fully-validated them at some point.
      */
     bool BlockRequestAllowed(const CBlockIndex& block_index) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+    /** Whether a block is too deep to serve to this peer, because we only
+     *  signal NODE_NETWORK_LIMITED and serving it would leak our prune height. */
+    bool BelowLimitedServingThreshold(const CNode& node, const Peer& peer, const CBlockIndex& block_index) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
     bool AlreadyHaveBlock(const uint256& block_hash) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
     void ProcessGetBlockData(CNode& pfrom, Peer& peer, const CInv& inv)
         EXCLUSIVE_LOCKS_REQUIRED(g_msgproc_mutex, !m_most_recent_block_mutex);
@@ -2184,6 +2187,15 @@ bool PeerManagerImpl::BlockRequestAllowed(const CBlockIndex& block_index)
            (GetBlockProofEquivalentTime(*m_chainman.m_best_header, block_index, *m_chainman.m_best_header, m_chainparams.GetConsensus()) < STALE_RELAY_AGE_LIMIT);
 }
 
+bool PeerManagerImpl::BelowLimitedServingThreshold(const CNode& node, const Peer& peer, const CBlockIndex& block_index)
+{
+    AssertLockHeld(cs_main);
+    return !node.HasPermission(NetPermissionFlags::NoBan) &&
+           ((peer.m_our_services & NODE_NETWORK_LIMITED) == NODE_NETWORK_LIMITED) &&
+           ((peer.m_our_services & NODE_NETWORK) != NODE_NETWORK) &&
+           (m_chainman.ActiveChain().Height() - block_index.nHeight > (int)NODE_NETWORK_LIMITED_MIN_BLOCKS + 2 /* add two blocks buffer extension for possible races */);
+}
+
 util::Expected<void, std::string> PeerManagerImpl::FetchBlock(NodeId peer_id, const CBlockIndex& block_index)
 {
     if (m_chainman.m_blockman.LoadingBlocks()) return util::Unexpected{"Loading blocks ..."};
@@ -2745,9 +2757,7 @@ void PeerManagerImpl::ProcessGetBlockData(CNode& pfrom, Peer& peer, const CInv& 
         }
         tip = m_chainman.ActiveChain().Tip();
         // Avoid leaking prune-height by never sending blocks below the NODE_NETWORK_LIMITED threshold
-        if (!pfrom.HasPermission(NetPermissionFlags::NoBan) && (
-                (((peer.m_our_services & NODE_NETWORK_LIMITED) == NODE_NETWORK_LIMITED) && ((peer.m_our_services & NODE_NETWORK) != NODE_NETWORK) && (tip->nHeight - pindex->nHeight > (int)NODE_NETWORK_LIMITED_MIN_BLOCKS + 2 /* add two blocks buffer extension for possible races */) )
-           )) {
+        if (BelowLimitedServingThreshold(pfrom, peer, *pindex)) {
             LogDebug(BCLog::NET, "Ignore block request below NODE_NETWORK_LIMITED threshold, %s", pfrom.DisconnectMsg());
             //disconnect node and prevent it from stalling (would otherwise wait for the missing block)
             pfrom.fDisconnect = true;
