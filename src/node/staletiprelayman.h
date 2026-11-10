@@ -46,6 +46,10 @@ public:
     /** @return Whether a new stale tip is tracked, so it should be relayed. */
     bool AcceptedStaleTip(const CChain& chain, const CBlockIndex& tip) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 
+    /** Get the tracked tips that are eligible for relay, with their fork
+     *  points, in the order they were added. */
+    std::vector<StaleFork> GetStaleTips(const CChain& chain) const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+
 private:
     const StaleTipRelayOptions m_opts;
     StaleTipTracker m_tracker GUARDED_BY(::cs_main);
