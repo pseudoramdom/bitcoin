@@ -1163,6 +1163,14 @@ private:
      * about and we fully-validated them at some point.
      */
     bool BlockRequestAllowed(const CBlockIndex& block_index) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+    /** How far below our active tip we serve blocks to this peer, or
+     *  std::nullopt if there is no limit. Limited when we only signal
+     *  NODE_NETWORK_LIMITED, as serving deeper blocks would leak our prune
+     *  height. */
+    std::optional<int> LimitedServingDepth(const CNode& node, const Peer& peer) const;
+    /** Whether a block is too deep to serve to this peer, because we only
+     *  signal NODE_NETWORK_LIMITED and serving it would leak our prune height. */
+    bool BelowLimitedServingThreshold(const CNode& node, const Peer& peer, const CBlockIndex& block_index) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
     bool AlreadyHaveBlock(const uint256& block_hash) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
     void ProcessGetBlockData(CNode& pfrom, Peer& peer, const CInv& inv)
         EXCLUSIVE_LOCKS_REQUIRED(g_msgproc_mutex, !m_most_recent_block_mutex);
@@ -2162,6 +2170,21 @@ bool PeerManagerImpl::BlockRequestAllowed(const CBlockIndex& block_index)
            (GetBlockProofEquivalentTime(*m_chainman.m_best_header, block_index, *m_chainman.m_best_header, m_chainparams.GetConsensus()) < STALE_RELAY_AGE_LIMIT);
 }
 
+std::optional<int> PeerManagerImpl::LimitedServingDepth(const CNode& node, const Peer& peer) const
+{
+    if (node.HasPermission(NetPermissionFlags::NoBan)) return std::nullopt;
+    if ((peer.m_our_services & NODE_NETWORK_LIMITED) != NODE_NETWORK_LIMITED) return std::nullopt;
+    if ((peer.m_our_services & NODE_NETWORK) == NODE_NETWORK) return std::nullopt;
+    return (int)NODE_NETWORK_LIMITED_MIN_BLOCKS + 2 /* add two blocks buffer extension for possible races */;
+}
+
+bool PeerManagerImpl::BelowLimitedServingThreshold(const CNode& node, const Peer& peer, const CBlockIndex& block_index)
+{
+    AssertLockHeld(cs_main);
+    const std::optional<int> max_depth{LimitedServingDepth(node, peer)};
+    return max_depth && m_chainman.ActiveChain().Height() - block_index.nHeight > *max_depth;
+}
+
 util::Expected<void, std::string> PeerManagerImpl::FetchBlock(NodeId peer_id, const CBlockIndex& block_index)
 {
     if (m_chainman.m_blockman.LoadingBlocks()) return util::Unexpected{"Loading blocks ..."};
@@ -2726,9 +2749,7 @@ void PeerManagerImpl::ProcessGetBlockData(CNode& pfrom, Peer& peer, const CInv& 
         }
         tip = m_chainman.ActiveChain().Tip();
         // Avoid leaking prune-height by never sending blocks below the NODE_NETWORK_LIMITED threshold
-        if (!pfrom.HasPermission(NetPermissionFlags::NoBan) && (
-                (((peer.m_our_services & NODE_NETWORK_LIMITED) == NODE_NETWORK_LIMITED) && ((peer.m_our_services & NODE_NETWORK) != NODE_NETWORK) && (tip->nHeight - pindex->nHeight > (int)NODE_NETWORK_LIMITED_MIN_BLOCKS + 2 /* add two blocks buffer extension for possible races */) )
-           )) {
+        if (BelowLimitedServingThreshold(pfrom, peer, *pindex)) {
             LogDebug(BCLog::NET, "Ignore block request below NODE_NETWORK_LIMITED threshold, %s", pfrom.DisconnectMsg());
             //disconnect node and prevent it from stalling (would otherwise wait for the missing block)
             pfrom.fDisconnect = true;
