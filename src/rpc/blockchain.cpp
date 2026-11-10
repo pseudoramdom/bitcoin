@@ -1607,6 +1607,7 @@ static RPCMethod getchaintips()
                 " including the main chain as well as orphaned branches.\n",
                 {
                     {"max_depth", RPCArg::Type::NUM, RPCArg::DefaultHint{"all tips"}, "Only return tips at most this many blocks below the active tip. The active tip, and tips higher than it, are always returned."},
+                    {"staletips_only", RPCArg::Type::BOOL, RPCArg::Default{false}, "Only return the recent stale tips tracked for stale-tip relay (BIP 332), including tracked tips that a known block builds on. Requires -staletips."},
                 },
                 RPCResult{
                     RPCResult::Type::ARR, "", "",
@@ -1627,19 +1628,24 @@ static RPCMethod getchaintips()
                 RPCExamples{
                     HelpExampleCli("getchaintips", "")
             + HelpExampleCli("getchaintips", "1000")
+            + HelpExampleCliNamed("getchaintips", {{"staletips_only", true}})
             + HelpExampleRpc("getchaintips", "")
                 },
         [](const RPCMethod& self, const JSONRPCRequest& request) -> UniValue
 {
-    ChainstateManager& chainman = EnsureAnyChainman(request.context);
+    const NodeContext& node = EnsureAnyNodeContext(request.context);
+    ChainstateManager& chainman = EnsureChainman(node);
     std::optional<int> max_depth;
     if (!request.params[0].isNull()) {
         max_depth = request.params[0].getInt<int>();
         if (*max_depth < 0) throw JSONRPCError(RPC_INVALID_PARAMETER, "max_depth must be non-negative");
     }
+    const bool staletips_only{!request.params[1].isNull() && request.params[1].get_bool()};
 
     LOCK(cs_main);
     CChain& active_chain = chainman.ActiveChain();
+    const auto stale_tips{staletips_only && node.peerman ? node.peerman->GetRelayableStaleTips() : std::nullopt};
+    if (staletips_only && !stale_tips) throw JSONRPCError(RPC_MISC_ERROR, "Stale-tip tracking is disabled (-staletips=none)");
 
     /*
      * Idea: The set of chain tips is the active chain tip, plus orphan blocks which do not have another orphan building off of them.
@@ -1649,24 +1655,32 @@ static RPCMethod getchaintips()
      *  - Add the active chain tip
      */
     std::set<const CBlockIndex*, CompareBlocksByHeight> setTips;
-    std::set<const CBlockIndex*> setOrphans;
-    std::set<const CBlockIndex*> setPrevs;
-
-    for (const auto& [_, block_index] : chainman.BlockIndex()) {
-        if (!active_chain.Contains(block_index)) {
-            setOrphans.insert(&block_index);
-            setPrevs.insert(block_index.pprev);
+    if (stale_tips) {
+        // Tracked tips are listed directly, so a tip that a known block
+        // builds on, and is therefore not a chain tip, is still reported.
+        for (const uint256& hash : *stale_tips) {
+            setTips.insert(CHECK_NONFATAL(chainman.m_blockman.LookupBlockIndex(hash)));
         }
-    }
+    } else {
+        std::set<const CBlockIndex*> setOrphans;
+        std::set<const CBlockIndex*> setPrevs;
 
-    for (std::set<const CBlockIndex*>::iterator it = setOrphans.begin(); it != setOrphans.end(); ++it) {
-        if (setPrevs.erase(*it) == 0) {
-            setTips.insert(*it);
+        for (const auto& [_, block_index] : chainman.BlockIndex()) {
+            if (!active_chain.Contains(block_index)) {
+                setOrphans.insert(&block_index);
+                setPrevs.insert(block_index.pprev);
+            }
         }
-    }
 
-    // Always report the currently active tip.
-    setTips.insert(active_chain.Tip());
+        for (std::set<const CBlockIndex*>::iterator it = setOrphans.begin(); it != setOrphans.end(); ++it) {
+            if (setPrevs.erase(*it) == 0) {
+                setTips.insert(*it);
+            }
+        }
+
+        // Always report the currently active tip.
+        setTips.insert(active_chain.Tip());
+    }
 
     /* Construct the output array.  */
     UniValue res(UniValue::VARR);

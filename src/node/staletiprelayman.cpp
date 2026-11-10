@@ -29,4 +29,10 @@ bool StaleTipRelayManager::AcceptedStaleTip(const CChain& chain, const CBlockInd
     return m_tracker.AddStaleTip(chain, &tip);
 }
 
+std::vector<StaleFork> StaleTipRelayManager::GetStaleTips(const CChain& chain) const
+{
+    AssertLockHeld(::cs_main);
+    return m_tracker.GetStaleTips(chain);
+}
+
 } // namespace node
