@@ -82,6 +82,7 @@ add_executable(fuzz
   p2p_handshake.cpp
   p2p_headers_presync.cpp
   p2p_private_broadcast.cpp
+  p2p_staletip.cpp
   p2p_transport_serialization.cpp
   pcp.cpp
   package_eval.cpp
