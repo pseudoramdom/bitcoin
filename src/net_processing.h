@@ -147,6 +147,10 @@ public:
     /** Get peer manager info. */
     virtual PeerManagerInfo GetInfo() const = 0;
 
+    /** Hashes of the tracked stale tips that are currently eligible for
+     *  relay, or std::nullopt if stale-tip relay is disabled. */
+    virtual std::optional<std::vector<uint256>> GetRelayableStaleTips() const = 0;
+
     /** Get info about transactions currently being privately broadcast. */
     virtual std::vector<PrivateBroadcast::TxBroadcastInfo> GetPrivateBroadcastInfo() const = 0;
 
