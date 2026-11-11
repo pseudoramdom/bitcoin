@@ -17,6 +17,7 @@
 #include <map>
 #include <optional>
 #include <set>
+#include <span>
 #include <vector>
 
 class CBlockIndex;
@@ -55,6 +56,7 @@ struct StaleTipRelayOptions {
  * - ValidationInterface callbacks.
  * - When a peer connects or disconnects.
  * - When a peer announces a stale tip.
+ * - When a best-effort block request times out.
  * - To get the stale tips to announce and the stale-branch blocks to request.
  *
  * This class is not thread-safe. Callers must hold cs_main.
@@ -82,7 +84,8 @@ public:
     void DisconnectedPeer(NodeId peer) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 
     /** Remember a stale tip `peer` announced, and track it if it is eligible.
-     *  The peer's offer of the branch's blocks is kept once made.
+     *  The peer's offer of the branch's blocks is kept once made, and making it
+     *  again clears a fetch timeout (see BlockFetchTimedOut()).
      *
      * @return Whether a new stale tip is tracked, so it should be relayed.
      */
@@ -115,7 +118,7 @@ public:
     /** Choose the missing blocks to request from `peer` on the stale branches
      *  it offered to serve, oldest offer first and parents first, without
      *  reaching MAX_IN_TRANSIT_FOR_STALE_BRANCH_REQUESTS blocks in flight from
-     *  it.
+     *  it. Offers whose requests timed out are skipped.
      *
      * @param[in] in_flight        Number of blocks in flight from the peer.
      * @param[in] is_requested     Whether a block is in flight from any peer.
@@ -126,6 +129,10 @@ public:
         NodeId peer, const CChain& chain, size_t in_flight,
         const IsRequestedFn& is_requested,
         const CanFetchBranchFn& can_fetch_branch) const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    /** Stop requesting the stale branches containing `cleared` from `peer`,
+     *  after a request for one of them timed out, until it announces their
+     *  tips with block data again. */
+    void BlockFetchTimedOut(NodeId peer, std::span<const CBlockIndex* const> cleared) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 
     /** Whether `block` is stored on a tracked, still-eligible stale branch and
      *  may be served to a peer that negotiated stale-tip relay. */
@@ -151,6 +158,10 @@ private:
         //! Whether the peer offered to serve the blocks on the tip's branch. It
         //! may not have connected them, so their scripts may be unchecked.
         bool have_block;
+        //! Whether a best-effort request for the tip's branch timed out, so the
+        //! branch is no longer requested from this peer until it announces the
+        //! tip again.
+        bool block_fetch_timed_out{false};
     };
 
     struct PeerInfo {

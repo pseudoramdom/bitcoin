@@ -57,6 +57,7 @@ bool StaleTipRelayManager::ReceivedStaleTip(NodeId peer, const CChain& chain, co
     auto& from_peer{it->second.m_staletips_from_peer};
     if (auto announced{std::ranges::find(from_peer, &tip, &StaleTipAnnouncement::tip)}; announced != from_peer.end()) {
         announced->have_block |= have_block;
+        if (have_block) announced->block_fetch_timed_out = false;
     } else {
         if (from_peer.size() >= MAX_STALETIPS_FROM_PEER) from_peer.pop_front();
         from_peer.push_back({.tip = &tip, .have_block = have_block});
@@ -136,6 +137,9 @@ void StaleTipRelayManager::AddStaleBranchBlocksToRequest(const CChain& chain, co
 {
     AssertLockHeld(::cs_main);
     if (in_flight + blocks.size() >= MAX_IN_TRANSIT_FOR_STALE_BRANCH_REQUESTS) return;
+    // Each branch is downloaded at most once. This stays true after the
+    // branch's blocks are pruned, so they are not downloaded again.
+    if (tip.HaveNumChainTxs()) return;
     if (!m_tracker.CanRequestStaleTipBlock(chain, &tip)) return;
 
     std::vector<const CBlockIndex*> missing_blocks;
@@ -165,11 +169,23 @@ std::vector<const CBlockIndex*> StaleTipRelayManager::GetBlocksToRequest(
     if (it == m_peers.end()) return blocks;
     for (const StaleTipAnnouncement& announced : it->second.m_staletips_from_peer) {
         if (in_flight + blocks.size() >= MAX_IN_TRANSIT_FOR_STALE_BRANCH_REQUESTS) break;
-        if (!announced.have_block) continue;
+        if (!announced.have_block || announced.block_fetch_timed_out) continue;
         if (!can_fetch_branch(*announced.tip)) continue;
         AddStaleBranchBlocksToRequest(chain, *announced.tip, in_flight, is_requested, blocks);
     }
     return blocks;
+}
+
+void StaleTipRelayManager::BlockFetchTimedOut(NodeId peer, std::span<const CBlockIndex* const> cleared)
+{
+    AssertLockHeld(::cs_main);
+    const auto it{m_peers.find(peer)};
+    if (it == m_peers.end()) return;
+    for (StaleTipAnnouncement& announced : it->second.m_staletips_from_peer) {
+        if (std::ranges::any_of(cleared, [&](const CBlockIndex* block) { return announced.tip->GetAncestor(block->nHeight) == block; })) {
+            announced.block_fetch_timed_out = true;
+        }
+    }
 }
 
 bool StaleTipRelayManager::CanServeStaleBranchBlock(const CChain& chain, const CBlockIndex& block) const

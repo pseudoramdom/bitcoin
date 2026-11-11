@@ -685,27 +685,36 @@ class P2PStaleTipTest(BitcoinTestFramework):
         self.nodes[0].disconnect_p2ps()
 
     def test_blocks_mode_caps_stale_branch_requests_and_clears_timeout(self):
-        self.log.info("Test stale branch requests are capped and time out without disconnect")
+        self.log.info("Test stale branch requests are capped and time out without disconnect or retry")
         node = self.nodes[0]
         node.setmocktime(node.getblockheader(node.getbestblockhash())["time"] + 1)
         peer = self.connect_peer(feature_data=b"\x01")
+        other_peer = self.connect_peer(feature_data=b"\x01")
 
         blocks, fork_point_hash = self.stale_branch(length=20, fork_depth=20)
         peer.send_and_ping(self.staletip_msg(blocks, fork_point_hash, have_block=True))
         self.assert_staletip_relayable(blocks[-1])
 
         expected_hashes = [block.hash_int for block in blocks[:MAX_IN_TRANSIT_FOR_STALE_BRANCH_REQUESTS]]
-        def getdata_hashes():
-            return [inv.hash for inv in peer.getdata if inv.type & MSG_TYPE_MASK == MSG_BLOCK]
-
-        self.wait_until(lambda: getdata_hashes() == expected_hashes)
+        self.wait_until(lambda: self.block_getdata_hashes(peer) == expected_hashes)
         assert_equal(len(node.getpeerinfo()[0]["inflight"]), MAX_IN_TRANSIT_FOR_STALE_BRANCH_REQUESTS)
+
+        # Another peer offers the requested part of the branch, which is
+        # already in flight from the first peer.
+        other_peer.send_and_ping(self.staletip_msg(blocks[:MAX_IN_TRANSIT_FOR_STALE_BRANCH_REQUESTS], fork_point_hash, have_block=True))
+        assert_equal(self.block_getdata_hashes(other_peer), [])
 
         with node.assert_debug_log(["Timeout downloading best-effort block"]):
             node.bumpmocktime(601)
             peer.sync_with_ping()
+
+        # The other peer's offer takes over, while the first peer's offer is
+        # not retried, not even for the rest of the branch.
+        self.wait_until(lambda: self.block_getdata_hashes(other_peer) == expected_hashes)
         peer.sync_with_ping()
         assert peer.is_connected
+        assert_equal(self.block_getdata_hashes(peer), expected_hashes)
+        assert_equal(node.getpeerinfo()[0]["inflight"], [])
 
         node.setmocktime(0)
         self.nodes[0].disconnect_p2ps()

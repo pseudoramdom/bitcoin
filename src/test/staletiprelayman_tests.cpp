@@ -371,4 +371,42 @@ BOOST_AUTO_TEST_CASE(requests_across_offers)
     BOOST_CHECK(manager.GetBlocksToRequest(1, chain, 0, NotRequested, AnyBranch).empty());
 }
 
+BOOST_AUTO_TEST_CASE(timed_out_offers)
+{
+    LOCK(::cs_main);
+
+    BlockTree tree;
+    CBlockIndex* active{tree.Add(nullptr, true, true)};
+    for (int i{0}; i < 5; ++i) active = tree.Add(active, true, true);
+    CBlockIndex* shared{tree.Add(active->GetAncestor(2), false)};
+    CBlockIndex* tip_a{tree.Add(shared, false)};
+    CBlockIndex* tip_b{tree.Add(shared, false)};
+    const CChain& chain{tree.active_chain};
+    using Blocks = std::vector<const CBlockIndex*>;
+
+    node::StaleTipRelayManager manager{{.fetch_blocks = true}};
+    manager.ConnectedPeer(0);
+    const auto request{[&]() EXCLUSIVE_LOCKS_REQUIRED(::cs_main) { return manager.GetBlocksToRequest(0, chain, 0, NotRequested, AnyBranch); }};
+    manager.ReceivedStaleTip(0, chain, *tip_a, /*have_block=*/true);
+    manager.ReceivedStaleTip(0, chain, *tip_b, /*have_block=*/true);
+
+    // A timeout stops requests for the offers whose branches contain the
+    // cleared blocks, until the tip is announced with block data again.
+    const Blocks cleared_a{tip_a};
+    manager.BlockFetchTimedOut(0, cleared_a);
+    BOOST_CHECK(request() == Blocks({shared, tip_b}));
+    const Blocks cleared_shared{shared};
+    manager.BlockFetchTimedOut(0, cleared_shared);
+    BOOST_CHECK(request().empty());
+    manager.ReceivedStaleTip(0, chain, *tip_b, /*have_block=*/false);
+    BOOST_CHECK(request().empty());
+    manager.ReceivedStaleTip(0, chain, *tip_b, /*have_block=*/true);
+    BOOST_CHECK(request() == Blocks({shared, tip_b}));
+
+    // A branch is downloaded at most once, even if its blocks are pruned
+    // later.
+    tip_b->m_chain_tx_count = 1;
+    BOOST_CHECK(request().empty());
+}
+
 BOOST_AUTO_TEST_SUITE_END()
