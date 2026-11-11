@@ -1069,8 +1069,11 @@ private:
     /** Drop all of a peer's in-flight best-effort block requests, after one of
      *  them timed out. Unlike a required request, this does not disconnect the
      *  peer. Removing the front request restarts the download timeout for the
-     *  peer's remaining requests. */
-    void ClearBestEffortBlockRequests(NodeId nodeid, CNodeState& state) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+     *  peer's remaining requests.
+     *
+     * @return The blocks whose requests were dropped.
+     */
+    std::vector<const CBlockIndex*> ClearBestEffortBlockRequests(NodeId nodeid, CNodeState& state) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
 
     bool TipMayBeStale() EXCLUSIVE_LOCKS_REQUIRED(cs_main);
 
@@ -1465,16 +1468,17 @@ bool PeerManagerImpl::BlockRequested(NodeId nodeid, const CBlockIndex& block, st
     return true;
 }
 
-void PeerManagerImpl::ClearBestEffortBlockRequests(NodeId nodeid, CNodeState& state)
+std::vector<const CBlockIndex*> PeerManagerImpl::ClearBestEffortBlockRequests(NodeId nodeid, CNodeState& state)
 {
     // RemoveBlockRequest() erases from vBlocksInFlight, so collect first.
-    std::vector<uint256> hashes;
+    std::vector<const CBlockIndex*> blocks;
     for (const QueuedBlock& block : state.vBlocksInFlight) {
-        if (block.m_type == BlockRequestType::BEST_EFFORT) hashes.push_back(block.pindex->GetBlockHash());
+        if (block.m_type == BlockRequestType::BEST_EFFORT) blocks.push_back(block.pindex);
     }
     LogDebug(BCLog::NET, "Timeout downloading best-effort block %s from peer=%d; clearing %u best-effort block request(s)",
-             state.vBlocksInFlight.front().pindex->GetBlockHash().ToString(), nodeid, hashes.size());
-    for (const uint256& hash : hashes) RemoveBlockRequest(hash, nodeid);
+             state.vBlocksInFlight.front().pindex->GetBlockHash().ToString(), nodeid, blocks.size());
+    for (const CBlockIndex* block : blocks) RemoveBlockRequest(block->GetBlockHash(), nodeid);
+    return blocks;
 }
 
 void PeerManagerImpl::MaybeSetPeerAsAnnouncingHeaderAndIDs(NodeId nodeid)
@@ -6829,7 +6833,8 @@ bool PeerManagerImpl::SendMessages(CNode& node)
                 // request, and new best-effort requests are queued behind it,
                 // so they cannot postpone it again.
                 if (queuedBlock.m_type == BlockRequestType::BEST_EFFORT) {
-                    ClearBestEffortBlockRequests(node.GetId(), state);
+                    const auto cleared{ClearBestEffortBlockRequests(node.GetId(), state)};
+                    if (m_staletiprelayman) m_staletiprelayman->BlockFetchTimedOut(node.GetId(), cleared);
                 } else {
                     LogInfo("Timeout downloading block %s, %s", queuedBlock.pindex->GetBlockHash().ToString(), node.DisconnectMsg());
                     node.fDisconnect = true;
