@@ -126,6 +126,7 @@ class ZMQTest (BitcoinTestFramework):
             self.test_sequence()
             self.test_mempool_sync()
             self.test_reorg()
+            self.test_stale_tip()
             self.test_multiple_interfaces()
             self.test_ipv6()
         finally:
@@ -154,12 +155,15 @@ class ZMQTest (BitcoinTestFramework):
         #   2. Try to receive the corresponding notification on all subscribers
         #   3. If all subscribers get the message within the timeout (1 second),
         #      we are done, otherwise repeat starting from step 1
-        for sub in subscribers:
+        # A newly mined block never causes a hashstaletip notification, so
+        # those subscribers have to handle the sync-up themselves.
+        sync_subscribers = [sub for sub in subscribers if sub.topic != b"hashstaletip"]
+        for sub in sync_subscribers:
             sub.socket.set(zmq.RCVTIMEO, 1000)
         while True:
             test_block = ZMQTestSetupBlock(self, self.nodes[0])
             recv_failed = False
-            for sub in subscribers:
+            for sub in sync_subscribers:
                 try:
                     while not test_block.caused_notification(sub.receive().hex()):
                         self.log.debug("Ignoring sync-up notification for previously generated block.")
@@ -304,6 +308,41 @@ class ZMQTest (BitcoinTestFramework):
         assert_equal(hashtx.receive().hex(), self.nodes[1].getblock(connect_blocks[1])["tx"][0])
         # And the current tip
         assert_equal(hashtx.receive().hex(), self.nodes[1].getblock(connect_blocks[0])["tx"][0])
+
+    def test_stale_tip(self):
+        self.log.info("Testing 'hashstaletip' publisher")
+        address = f"tcp://127.0.0.1:{self.zmq_port_base}"
+        # Chain lengths differ after the reorg test, so don't sync blocks.
+        [staletip] = self.setup_zmq_test([("hashstaletip", address)], sync_blocks=False)
+        self.disconnect_nodes(0, 1)
+        node = self.nodes[0]
+        tip = node.getbestblockhash()
+        tip_header = node.getblockheader(tip)
+
+        def create_sibling(ntime):
+            block = create_block(int(tip_header["previousblockhash"], 16), height=tip_header["height"], ntime=ntime)
+            block.solve()
+            return block
+
+        self.log.info("Submit sibling headers of the tip until a hashstaletip notification arrives")
+        staletip.socket.set(zmq.RCVTIMEO, 1000)
+        ntime = tip_header["time"]
+        while True:
+            ntime += 1
+            sibling = create_sibling(ntime)
+            assert_equal(node.submitheader(sibling.serialize()[:80].hex()), None)
+            try:
+                while staletip.receive().hex() != sibling.hash_hex:
+                    self.log.debug("Ignoring hashstaletip notification for a previous sibling.")
+                break
+            except zmq.error.Again:
+                self.log.debug("Didn't receive hashstaletip notification, trying again.")
+        staletip.socket.set(zmq.RCVTIMEO, int(60 * self.options.timeout_factor * 1000))
+
+        self.log.info("Submitting the full sibling block publishes its hash again")
+        assert_equal(node.submitblock(sibling.serialize().hex()), "inconclusive")
+        assert_equal(staletip.receive().hex(), sibling.hash_hex)
+        assert_equal(node.getbestblockhash(), tip)
 
     def test_sequence(self):
         """

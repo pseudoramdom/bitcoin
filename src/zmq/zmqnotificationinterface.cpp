@@ -45,6 +45,7 @@ std::unique_ptr<CZMQNotificationInterface> CZMQNotificationInterface::Create(std
 {
     std::map<std::string, CZMQNotifierFactory> factories;
     factories["pubhashblock"] = CZMQAbstractNotifier::Create<CZMQPublishHashBlockNotifier>;
+    factories["pubhashstaletip"] = CZMQAbstractNotifier::Create<CZMQPublishHashStaleTipNotifier>;
     factories["pubhashtx"] = CZMQAbstractNotifier::Create<CZMQPublishHashTransactionNotifier>;
     factories["pubrawblock"] = [&get_block_by_index]() -> std::unique_ptr<CZMQAbstractNotifier> {
         return std::make_unique<CZMQPublishRawBlockNotifier>(get_block_by_index);
@@ -207,6 +208,13 @@ void CZMQNotificationInterface::BlockDisconnected(const std::shared_ptr<const CB
     // Next we notify BlockDisconnect listeners for *all* blocks
     TryForEachAndRemoveFailed(notifiers, [pindexDisconnected](CZMQAbstractNotifier* notifier) {
         return notifier->NotifyBlockDisconnect(pindexDisconnected);
+    });
+}
+
+void CZMQNotificationInterface::AcceptedStaleTip(const CBlockIndex* pindex)
+{
+    TryForEachAndRemoveFailed(notifiers, [pindex](CZMQAbstractNotifier* notifier) {
+        return notifier->NotifyStaleTip(pindex);
     });
 }
 
