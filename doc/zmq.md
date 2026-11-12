@@ -60,6 +60,7 @@ Currently, the following notifications are supported:
 
     -zmqpubhashtx=address
     -zmqpubhashblock=address
+    -zmqpubhashstaletip=address
     -zmqpubrawblock=address
     -zmqpubrawtx=address
     -zmqpubsequence=address
@@ -73,6 +74,7 @@ The option to set the PUB socket's outbound message high water mark
 
     -zmqpubhashtxhwm=n
     -zmqpubhashblockhwm=n
+    -zmqpubhashstaletiphwm=n
     -zmqpubrawblockhwm=n
     -zmqpubrawtxhwm=n
     -zmqpubsequencehwm=n
@@ -98,16 +100,17 @@ provided in bitcoin.conf.
 All ZMQ messages share the same structure with three parts: _topic_ string,
 message _body_, and _message sequence number_:
 
-    | topic     | body                                                 | message sequence number  |
-    |-----------+------------------------------------------------------+--------------------------|
-    | rawtx     | <serialized transaction>                             | <4-byte LE uint>         |
-    | hashtx    | <reversed 32-byte transaction hash>                  | <4-byte LE uint>         |
-    | rawblock  | <serialized block>                                   | <4-byte LE uint>         |
-    | hashblock | <reversed 32-byte block hash>                        | <4-byte LE uint>         |
-    | sequence  | <reversed 32-byte block hash>C                       | <4-byte LE uint>         |
-    | sequence  | <reversed 32-byte block hash>D                       | <4-byte LE uint>         |
-    | sequence  | <reversed 32-byte transaction hash>R<8-byte LE uint> | <4-byte LE uint>         |
-    | sequence  | <reversed 32-byte transaction hash>A<8-byte LE uint> | <4-byte LE uint>         |
+    | topic        | body                                                 | message sequence number  |
+    |--------------+------------------------------------------------------+--------------------------|
+    | rawtx        | <serialized transaction>                             | <4-byte LE uint>         |
+    | hashtx       | <reversed 32-byte transaction hash>                  | <4-byte LE uint>         |
+    | rawblock     | <serialized block>                                   | <4-byte LE uint>         |
+    | hashblock    | <reversed 32-byte block hash>                        | <4-byte LE uint>         |
+    | hashstaletip | <reversed 32-byte block hash>                        | <4-byte LE uint>         |
+    | sequence     | <reversed 32-byte block hash>C                       | <4-byte LE uint>         |
+    | sequence     | <reversed 32-byte block hash>D                       | <4-byte LE uint>         |
+    | sequence     | <reversed 32-byte transaction hash>R<8-byte LE uint> | <4-byte LE uint>         |
+    | sequence     | <reversed 32-byte transaction hash>A<8-byte LE uint> | <4-byte LE uint>         |
 
 where:
 
@@ -141,6 +144,15 @@ body part of the message is the serialized block.
 Notifies when the chain tip is updated. When assumeutxo is in use, this notification will
 not be issued for historical blocks connected to the background validation chainstate. The
 body part of the message is the 32-byte block hash in reversed byte order.
+
+#### hashstaletip
+
+Notifies when a block header or block is accepted that is not on the active chain and has
+no more work than the active tip. The body part of the message is the 32-byte block hash in
+reversed byte order. This means a block could be published twice: first when its header is
+accepted and then again when its block data is stored. Blocks that become stale through a
+reorganization are not published here; the `sequence` topic reports them as disconnected.
+This notification does not depend on `-staletips`.
 
 #### sequence
 

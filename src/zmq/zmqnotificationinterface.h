@@ -37,6 +37,7 @@ protected:
     void BlockConnected(const kernel::ChainstateRole& role, const std::shared_ptr<const CBlock>& pblock, const CBlockIndex* pindexConnected) override;
     void BlockDisconnected(const std::shared_ptr<const CBlock>& pblock, const CBlockIndex* pindexDisconnected) override;
     void UpdatedBlockTip(const CBlockIndex *pindexNew, const CBlockIndex *pindexFork, bool fInitialDownload) override;
+    void AcceptedStaleTip(const CBlockIndex* pindex) override;
 
 private:
     CZMQNotificationInterface();

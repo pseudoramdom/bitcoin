@@ -31,6 +31,11 @@ bool CZMQAbstractNotifier::NotifyBlockDisconnect(const CBlockIndex * /*CBlockInd
     return true;
 }
 
+bool CZMQAbstractNotifier::NotifyStaleTip(const CBlockIndex * /*CBlockIndex*/)
+{
+    return true;
+}
+
 bool CZMQAbstractNotifier::NotifyTransactionAcceptance(const CTransaction &/*transaction*/, uint64_t mempool_sequence)
 {
     return true;
