@@ -35,6 +35,7 @@ static const char *MSG_HASHTX    = "hashtx";
 static const char *MSG_RAWBLOCK  = "rawblock";
 static const char *MSG_RAWTX     = "rawtx";
 static const char *MSG_SEQUENCE  = "sequence";
+static const char *MSG_HASHSTALETIP = "hashstaletip";
 
 // Internal function to send multipart message
 static int zmq_send_multipart(void *sock, const void* data, size_t size, ...)
@@ -216,6 +217,17 @@ bool CZMQPublishHashBlockNotifier::NotifyBlock(const CBlockIndex *pindex)
         data[31 - i] = hash.begin()[i];
     }
     return SendZmqMessage(MSG_HASHBLOCK, data, 32);
+}
+
+bool CZMQPublishHashStaleTipNotifier::NotifyStaleTip(const CBlockIndex *pindex)
+{
+    uint256 hash = pindex->GetBlockHash();
+    LogDebug(BCLog::ZMQ, "Publish hashstaletip %s to %s\n", hash.GetHex(), this->address);
+    uint8_t data[32];
+    for (unsigned int i = 0; i < 32; i++) {
+        data[31 - i] = hash.begin()[i];
+    }
+    return SendZmqMessage(MSG_HASHSTALETIP, data, 32);
 }
 
 bool CZMQPublishHashTransactionNotifier::NotifyTransaction(const CTransaction &transaction)
