@@ -1173,6 +1173,11 @@ private:
     std::optional<int> LimitedServingDepth(const CNode& node, const Peer& peer) const;
     /** Whether a block is deeper than LimitedServingDepth() allows. */
     bool BelowLimitedServingThreshold(const CNode& node, const Peer& peer, const CBlockIndex& block_index) const EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+    /** Whether serving a block to this peer would exceed the historical
+     *  block serving limit, which keeps -maxuploadtarget capacity for recent
+     *  blocks. Applies to blocks older than HISTORICAL_BLOCK_AGE, and to every
+     *  `filtered` (merkleblock) request. */
+    bool HistoricalServingLimitReached(const CNode& node, const CBlockIndex& block_index, bool filtered) const EXCLUSIVE_LOCKS_REQUIRED(cs_main);
     bool AlreadyHaveBlock(const uint256& block_hash) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
     void ProcessGetBlockData(CNode& pfrom, Peer& peer, const CInv& inv)
         EXCLUSIVE_LOCKS_REQUIRED(g_msgproc_mutex, !m_most_recent_block_mutex);
@@ -2188,6 +2193,18 @@ bool PeerManagerImpl::BelowLimitedServingThreshold(const CNode& node, const Peer
     return max_depth && m_chainman.ActiveChain().Height() - block_index.nHeight > *max_depth;
 }
 
+bool PeerManagerImpl::HistoricalServingLimitReached(const CNode& node, const CBlockIndex& block_index, bool filtered) const
+{
+    AssertLockHeld(cs_main);
+    // Nodes with the download permission may exceed the target.
+    if (node.HasPermission(NetPermissionFlags::Download)) return false;
+    const bool historical{filtered ||
+                          (m_chainman.m_best_header != nullptr &&
+                           m_chainman.m_best_header->GetBlockTime() - block_index.GetBlockTime() > HISTORICAL_BLOCK_AGE)};
+    // Check the target last, as it takes a lock.
+    return historical && m_connman.OutboundTargetReached(/*historicalBlockServingLimit=*/true);
+}
+
 util::Expected<void, std::string> PeerManagerImpl::FetchBlock(NodeId peer_id, const CBlockIndex& block_index)
 {
     if (m_chainman.m_blockman.LoadingBlocks()) return util::Unexpected{"Loading blocks ..."};
@@ -2739,10 +2756,7 @@ void PeerManagerImpl::ProcessGetBlockData(CNode& pfrom, Peer& peer, const CInv& 
             return;
         }
         // disconnect node in case we have reached the outbound limit for serving historical blocks
-        if (m_connman.OutboundTargetReached(true) &&
-            (((m_chainman.m_best_header != nullptr) && (m_chainman.m_best_header->GetBlockTime() - pindex->GetBlockTime() > HISTORICAL_BLOCK_AGE)) || inv.IsMsgFilteredBlk()) &&
-            !pfrom.HasPermission(NetPermissionFlags::Download) // nodes with the download permission may exceed target
-        ) {
+        if (HistoricalServingLimitReached(pfrom, *pindex, inv.IsMsgFilteredBlk())) {
             LogDebug(BCLog::NET, "historical block serving limit reached, %s", pfrom.DisconnectMsg());
             pfrom.fDisconnect = true;
             return;
