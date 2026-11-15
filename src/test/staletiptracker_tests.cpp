@@ -16,6 +16,7 @@
 #include <boost/test/unit_test.hpp>
 
 #include <algorithm>
+#include <optional>
 #include <utility>
 #include <vector>
 
@@ -381,13 +382,31 @@ BOOST_AUTO_TEST_CASE(staletip_tracker_signet_requires_validated_block)
     CBlockIndex* active{tree.Add(nullptr, /*active=*/true, {.have_data = true})};
     for (int i{0}; i < 3; ++i) active = tree.Add(active, /*active=*/true, {.have_data = true});
 
-    CBlockIndex* headers_only{tree.Add(active->pprev, /*active=*/false)};
+    CBlockIndex* headers_only{tree.Add(active->pprev, /*active=*/false, {.time = active->nTime})};
+    bool readable{false};
+    unsigned int reads{0};
+    const auto lookup = [&](const CBlockIndex& block) -> std::optional<uint256> {
+        ++reads;
+        if (&block == headers_only && !readable) return std::nullopt;
+        return block.hashMerkleRoot;
+    };
     StaleTipTracker tracker{ChainType::SIGNET};
+    tracker.SetSignetRootReader(lookup);
     BOOST_CHECK(tracker.CanRequestStaleTipBlock(tree.active_chain, *headers_only));
     BOOST_CHECK(!tracker.AddStaleTip(tree.active_chain, *headers_only));
+    BOOST_CHECK_EQUAL(reads, 0U);
 
     headers_only->RaiseValidity(BLOCK_VALID_TRANSACTIONS);
+    BOOST_CHECK(!tracker.AddStaleTip(tree.active_chain, *headers_only));
+    BOOST_CHECK_EQUAL(reads, 0U);
     headers_only->nStatus |= BLOCK_HAVE_DATA;
+    BOOST_CHECK(!tracker.AddStaleTip(tree.active_chain, *headers_only));
+    BOOST_CHECK_GT(reads, 0U);
+    readable = true;
+    // Blocks are not read for a tip that a peer announced.
+    const auto failed_reads{reads};
+    BOOST_CHECK(!tracker.AddStaleTip(tree.active_chain, *headers_only, /*read_blocks=*/false));
+    BOOST_CHECK_EQUAL(reads, failed_reads);
     BOOST_CHECK(tracker.AddStaleTip(tree.active_chain, *headers_only));
     // The block was validated, so pruning it keeps the tip eligible.
     headers_only->nStatus &= ~BLOCK_HAVE_DATA;
@@ -425,24 +444,42 @@ BOOST_AUTO_TEST_CASE(staletip_tracker_signet_variant_policy)
     for (int i{0}; i < 3; ++i) active = tree.Add(active, /*active=*/true, {.have_data = true});
 
     CBlockIndex* fork{Assert(Assert(active->pprev)->pprev)};
-    const uint256 shared_merkle_root{uint8_t{42}};
-    CBlockIndex* first_variant{tree.Add(fork, /*active=*/false, {.have_data = true, .merkle_root = shared_merkle_root})};
-    CBlockIndex* second_variant{tree.Add(fork, /*active=*/false, {.have_data = true, .merkle_root = shared_merkle_root})};
+    CBlockIndex* first_variant{tree.Add(fork, /*active=*/false, {.have_data = true})};
+    CBlockIndex* second_variant{tree.Add(fork, /*active=*/false, {.have_data = true, .time = first_variant->nTime})};
+    BOOST_REQUIRE(first_variant->hashMerkleRoot != second_variant->hashMerkleRoot);
+    unsigned int reads{0};
+    const auto lookup = [&](const CBlockIndex& block) {
+        ++reads;
+        return &block == second_variant ? first_variant->hashMerkleRoot : block.hashMerkleRoot;
+    };
 
     StaleTipTracker tips{ChainType::SIGNET};
+    tips.SetSignetRootReader(lookup);
     BOOST_CHECK(tips.AddStaleTip(tree.active_chain, *first_variant));
+    BOOST_CHECK_EQUAL(reads, 0U);
     BOOST_CHECK(!tips.AddStaleTip(tree.active_chain, *second_variant));
+    BOOST_REQUIRE_GT(reads, 0U);
+    const auto first_comparison_reads{reads};
+    BOOST_CHECK(!tips.AddStaleTip(tree.active_chain, *second_variant));
+    BOOST_CHECK_EQUAL(reads, first_comparison_reads);
 
     CBlockIndex* extended_second{tree.Add(second_variant, /*active=*/false, {.have_data = true})};
     BOOST_CHECK(tips.AddStaleTip(tree.active_chain, *extended_second));
+    BOOST_CHECK_EQUAL(reads, first_comparison_reads);
     const auto forks{tips.GetStaleTips(tree.active_chain)};
     BOOST_REQUIRE_EQUAL(forks.size(), 1U);
     BOOST_CHECK_EQUAL(forks.front().tip, extended_second);
     // The first variant is now a variant of a block on a tracked branch.
     BOOST_CHECK(!tips.AddStaleTip(tree.active_chain, *first_variant));
 
-    CBlockIndex* active_variant{tree.Add(active->pprev, /*active=*/false, {.have_data = true, .merkle_root = active->hashMerkleRoot})};
+    CBlockIndex* active_variant{tree.Add(active->pprev, /*active=*/false, {.have_data = true, .merkle_root = active->hashMerkleRoot, .time = active->nTime})};
     BOOST_CHECK(!tips.AddStaleTip(tree.active_chain, *active_variant));
+    CBlockIndex* different_time{tree.Add(active->pprev, /*active=*/false, {.have_data = true, .merkle_root = active->hashMerkleRoot})};
+    BOOST_CHECK(tips.AddStaleTip(tree.active_chain, *different_time));
+    CBlockIndex* different_version{tree.Add(active->pprev, /*active=*/false,
+        {.have_data = true, .merkle_root = active->hashMerkleRoot, .time = active->nTime, .version = active->nVersion + 1})};
+    BOOST_CHECK(tips.AddStaleTip(tree.active_chain, *different_version));
+    BOOST_CHECK_EQUAL(reads, first_comparison_reads);
 
     // Other networks track every variant.
     StaleTipTracker main_tips;
@@ -460,8 +497,7 @@ BOOST_AUTO_TEST_CASE(staletip_tracker_signet_variant_becomes_active)
     for (int i{0}; i < 3; ++i) active = tree.Add(active, /*active=*/true, {.have_data = true});
 
     CBlockIndex* fork{active->pprev};
-    const uint256 shared_merkle_root{uint8_t{42}};
-    CBlockIndex* stale{tree.Add(fork, /*active=*/false, {.have_data = true, .merkle_root = shared_merkle_root})};
+    CBlockIndex* stale{tree.Add(fork, /*active=*/false, {.have_data = true})};
 
     StaleTipTracker tips{ChainType::SIGNET};
     BOOST_CHECK(tips.AddStaleTip(tree.active_chain, *stale));
@@ -469,14 +505,68 @@ BOOST_AUTO_TEST_CASE(staletip_tracker_signet_variant_becomes_active)
 
     // Reorg onto a branch whose block at the tracked tip's height is a
     // variant of it. The tip is no longer eligible, as if it were added now.
-    CBlockIndex* variant{tree.Add(fork, /*active=*/false, {.have_data = true, .merkle_root = shared_merkle_root})};
+    CBlockIndex* variant{tree.Add(fork, /*active=*/false, {.have_data = true, .time = stale->nTime})};
     tree.Add(variant, /*active=*/true, {.have_data = true});
+    unsigned int reads{0};
+    tips.SetSignetRootReader([&](const CBlockIndex& block) {
+        ++reads;
+        return &block == variant ? stale->hashMerkleRoot : block.hashMerkleRoot;
+    });
+    // The headers don't settle it, so the tip is withheld until it has been
+    // compared with the newly active block.
+    BOOST_CHECK(tips.GetStaleTips(tree.active_chain).empty());
+    BOOST_CHECK(!tips.CanServeStaleBranchBlock(tree.active_chain, *stale));
+    BOOST_CHECK_EQUAL(reads, 0U);
+    tips.RefreshSignetVariants(tree.active_chain);
+    BOOST_CHECK_GT(reads, 0U);
     BOOST_CHECK(!tips.AddStaleTip(tree.active_chain, *stale));
     BOOST_CHECK(tips.GetStaleTips(tree.active_chain).empty());
 
-    // It stays tracked, and is eligible again once the variant is reorged out.
+    // It stays tracked, and is eligible again once the variant is reorged
+    // out, here for a block with the same version and time that is not one.
+    tree.Add(fork, /*active=*/true, {.have_data = true, .time = stale->nTime});
+    BOOST_CHECK(tips.GetStaleTips(tree.active_chain).empty());
+    tips.RefreshSignetVariants(tree.active_chain);
+    BOOST_CHECK_EQUAL(tips.GetStaleTips(tree.active_chain).size(), 1U);
+    BOOST_CHECK(tips.CanServeStaleBranchBlock(tree.active_chain, *stale));
+
     tree.active_chain.SetTip(*active);
     BOOST_CHECK_EQUAL(tips.GetStaleTips(tree.active_chain).size(), 1U);
+}
+
+BOOST_AUTO_TEST_CASE(staletip_tracker_signet_root_cache_bound)
+{
+    LOCK(::cs_main);
+
+    BlockTree tree;
+    CBlockIndex* fork{tree.Add(nullptr, /*active=*/true, {.have_data = true})};
+    CBlockIndex* active{tree.Add(fork, /*active=*/true, {.have_data = true})};
+    CBlockIndex* distinct{tree.Add(fork, /*active=*/false, {.have_data = true, .time = active->nTime})};
+    unsigned int reads{0};
+
+    StaleTipTracker tips{ChainType::SIGNET};
+    tips.SetSignetRootReader([&](const CBlockIndex& block) {
+        ++reads;
+        return &block == distinct ? distinct->hashMerkleRoot : active->hashMerkleRoot;
+    });
+    BOOST_REQUIRE(tips.AddStaleTip(tree.active_chain, *distinct));
+    BOOST_CHECK_EQUAL(reads, 2U);
+
+    // Each variant of the active block is read once. The active block's root
+    // stays cached, as it is used for every comparison.
+    std::vector<const CBlockIndex*> variants;
+    for (size_t i{0}; i <= StaleTipTracker::MAX_CACHED_SIGNET_ROOTS; ++i) {
+        variants.push_back(tree.Add(fork, /*active=*/false, {.have_data = true, .time = active->nTime}));
+        BOOST_CHECK(!tips.AddStaleTip(tree.active_chain, *variants.back()));
+    }
+    BOOST_CHECK_EQUAL(reads, 2U + variants.size());
+
+    // The tracked tip's root was evicted, but it was already compared with
+    // the active block.
+    BOOST_CHECK_EQUAL(tips.GetStaleTips(tree.active_chain).size(), 1U);
+    // An evicted root is read again.
+    BOOST_CHECK(!tips.AddStaleTip(tree.active_chain, *variants.front()));
+    BOOST_CHECK_EQUAL(reads, 3U + variants.size());
 }
 
 /** A BlockManager whose block index holds an active chain of five blocks,
@@ -492,7 +582,7 @@ struct SeedFromBlockIndexSetup : public ChainTestingSetup {
     {
         LOCK(::cs_main);
         for (int i{0}; i < 5; ++i) {
-            active = Add(active);
+            active = Add(active, {.have_data = true});
             active_chain.SetTip(*active);
         }
     }
@@ -564,14 +654,19 @@ BOOST_FIXTURE_TEST_CASE(staletip_seed_signet_skips_active_tip_variant, SeedFromB
 {
     LOCK(::cs_main);
 
-    const CBlockIndex* active_variant{Add(active->pprev, {.have_data = true, .merkle_root = active->hashMerkleRoot})};
+    const CBlockIndex* active_variant{Add(active->pprev, {.have_data = true, .time = active->nTime})};
+    const CBlockIndex* distinct{Add(active->pprev, {.have_data = true, .time = active->nTime})};
 
     StaleTipTracker signet_tracker{ChainType::SIGNET};
-    BOOST_CHECK(Seed(signet_tracker).empty());
+    signet_tracker.SetSignetRootReader([&](const CBlockIndex& block) {
+        return &block == active_variant ? active->hashMerkleRoot : block.hashMerkleRoot;
+    });
+    BOOST_CHECK(Seed(signet_tracker) == std::vector<const CBlockIndex*>{distinct});
 
     // Header variants are only deduplicated on signet.
     StaleTipTracker main_tracker;
-    BOOST_CHECK(Seed(main_tracker) == std::vector<const CBlockIndex*>{active_variant});
+    const std::vector<const CBlockIndex*> expected{active_variant, distinct};
+    BOOST_CHECK(std::ranges::is_permutation(Seed(main_tracker), expected));
 }
 
 BOOST_AUTO_TEST_SUITE_END()

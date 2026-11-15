@@ -9,10 +9,13 @@
 #include <chain.h>
 #include <kernel/cs_main.h>
 #include <staletipmessage.h>
+#include <uint256.h>
 #include <util/chaintype.h>
 
 #include <cstddef>
+#include <functional>
 #include <optional>
+#include <utility>
 #include <vector>
 
 namespace node {
@@ -56,22 +59,46 @@ StaleTipMessage MakeStaleTipMessage(const StaleFork& fork, bool have_block) EXCL
  *
  * Stricter policies apply on test networks: on signet the tip's block must
  * have been validated (the block signature cannot be verified from headers
- * alone) and header variants are deduplicated, including against the active
+ * alone) and block variants are deduplicated, including against the active
  * chain, while on testnet the tip must meet a minimum difficulty so that
  * min-difficulty blocks are not relayed.
+ *
+ * Signet blocks are variants when the data their BIP 325 signature commits
+ * to is the same: the previous block, version, time and signet merkle root.
+ * Anyone can turn a signed block into a variant with a different header
+ * merkle root by changing its unsigned solution. The signet merkle root is
+ * not in the header, so comparing it can require reading both blocks. Blocks
+ * are only read when a tip is added from a validation event and in
+ * RefreshSignetVariants(), never to answer a peer.
  */
 class StaleTipTracker
 {
+public:
+    /** Reads a block and returns its BIP 325 merkle root, if it can. */
+    using SignetRootReader = std::function<std::optional<uint256>(const CBlockIndex&)>;
+    //! Room for every tracked tip and the active block it is compared with,
+    //! and as many candidates.
+    static constexpr size_t MAX_CACHED_SIGNET_ROOTS{4 * MAX_ADVERTISED_STALETIPS};
+
 private:
+    struct TrackedTip {
+        const CBlockIndex* index;
+        //! On signet, the active chain's block at the tip's height that the
+        //! tip was last compared with, and whether it is a variant of it.
+        //! The active chain can change before RefreshSignetVariants() runs,
+        //! so the result only holds while that block is still active.
+        const CBlockIndex* compared_with{nullptr};
+        bool is_variant{false};
+    };
     //! Tracked stale tips in the order they were added, oldest first.
     //! Never holds more than MAX_ADVERTISED_STALETIPS entries.
-    std::vector<const CBlockIndex*> m_tips;
-    //! Only track a tip once its block has been validated. Set on signet,
-    //! where the block signature cannot be checked from the header alone.
-    bool m_require_validated_block{false};
-    //! Track at most one header variant of a block, where variants have the
-    //! same previous block and merkle root. Set on signet.
-    bool m_dedup_header_variants{false};
+    std::vector<TrackedTip> m_tips;
+    //! Signet requires a validated block and tracks at most one tip with the same signed data.
+    bool m_signet;
+    SignetRootReader m_read_signet_root;
+    //! BIP 325 merkle roots of compared blocks, least recently used first.
+    //! Never holds more than MAX_CACHED_SIGNET_ROOTS entries.
+    std::vector<std::pair<const CBlockIndex*, uint256>> m_signet_roots;
     //! Highest proof-of-work target a tracked tip may have, if limited. Set
     //! on testnet3 and testnet4, where minimum-difficulty blocks are cheap.
     std::optional<arith_uint256> m_max_target;
@@ -82,11 +109,27 @@ private:
 
     /** Find the fork point of `stale_tip` with the active chain, checking that
      *  the tip is eligible. On signet, AddStaleTip() also requires the tip's
-     *  block to have been validated.
+     *  block to have been validated, and variants are checked separately.
      *
      * @return The fork point, or nullptr if the tip is not eligible.
      */
     const CBlockIndex* GetEligibleForkPoint(const CChain& active_chain, const CBlockIndex& stale_tip) const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    /** The BIP 325 merkle root of `block`, from the cache or, if `read_blocks`
+     *  is set, by reading its validated block. */
+    std::optional<uint256> GetSignetRoot(const CBlockIndex& block, bool read_blocks) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    /** Whether two signet blocks are variants.
+     *
+     * @return std::nullopt if the headers don't settle it and a signet merkle
+     *         root is not available.
+     */
+    std::optional<bool> IsVariant(const CBlockIndex& block, const CBlockIndex& other, bool read_blocks) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    /** Whether `block` is a variant of the block at its height on the branch
+     *  ending at `branch_tip` (see IsVariant()). */
+    std::optional<bool> IsVariantOnBranch(const CBlockIndex& block, const CBlockIndex& branch_tip, bool read_blocks) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    /** Whether a tracked signet tip must not be relayed because it is a
+     *  variant of the active chain's block at its height, or may be one: the
+     *  headers don't settle it and it was not compared with that block yet. */
+    bool IsHiddenByActiveChain(const CChain& active_chain, const TrackedTip& tip) const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
     /** Whether `stale_tip` can never become eligible again: it is known to be
      *  invalid, or too far below the active tip. */
     bool IsExpired(const CChain& active_chain, const CBlockIndex& stale_tip) const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
@@ -105,8 +148,9 @@ private:
      *  on its own branch. A tip built on a variant of a tracked tip therefore
      *  replaces it, which BIP 332 does not require. Tips that only descend
      *  from variants of the same block, without being variants themselves,
-     *  are all kept, as the BIP allows. */
-    bool Add(const CBlockIndex& stale_tip) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+     *  are all kept, as the BIP allows. A comparison that cannot be made
+     *  keeps `stale_tip` out, but never drops a tracked tip. */
+    bool Add(const CChain& active_chain, const CBlockIndex& stale_tip, bool read_blocks) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 
 public:
     /** Construct a tracker applying `chain_type`'s policy, with optional
@@ -115,22 +159,35 @@ public:
                              int recent_window = STALETIP_RECENT_WINDOW,
                              size_t max_headers = MAX_STALETIP_HEADERS);
 
+    /** Set how signet blocks are read to compare their BIP 325 merkle roots.
+     *  Without a reader, only cached roots are compared. */
+    void SetSignetRootReader(SignetRootReader reader) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+
     /** Track the eligible stale tips already in the block index, as the
      *  tracker is not persisted. Scans every block index entry, so it is
      *  meant to be called once at startup. */
     void SeedFromBlockIndex(const node::BlockManager& blockman, const CChain& active_chain) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    /** Compare the tracked signet tips with the blocks now on the active
+     *  chain, reading blocks where needed. Until this is called after the
+     *  active chain changes, a tip that may be a variant of a newly active
+     *  block is not relayed. */
+    void RefreshSignetVariants(const CChain& active_chain) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 
     /** Track `stale_tip` if it is eligible (see GetEligibleForkPoint()) and can
      *  be retained under the tracker's resource limits. On signet, the tip's
-     *  block must also have been validated.
+     *  block must also have been validated, and it must be known not to be a
+     *  variant of an active or tracked block.
      *
+     * @param[in] read_blocks Whether signet blocks may be read to compare
+     *                        variants. If not, only cached roots are used.
      * @return Whether the tracker was updated to track `stale_tip`.
      */
-    bool AddStaleTip(const CChain& active_chain, const CBlockIndex& stale_tip) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    bool AddStaleTip(const CChain& active_chain, const CBlockIndex& stale_tip, bool read_blocks = true) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
     /** Whether the block data for `stale_tip` may be requested from a peer.
      *  On signet, AddStaleTip() requires the block to have been validated;
      *  requesting it is allowed before then, since the signet signature can
-     *  only be verified with the block data. */
+     *  only be verified with the block data. The same goes for comparing
+     *  variants, unless the headers alone show that it is one. */
     bool CanRequestStaleTipBlock(const CChain& active_chain, const CBlockIndex& stale_tip) const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
     /** Whether `block` is stored on a tracked, still-eligible stale branch and
      *  may be served to a peer that negotiated stale-tip relay. */

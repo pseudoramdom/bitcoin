@@ -12,6 +12,8 @@
 
 #include <algorithm>
 #include <cstddef>
+#include <optional>
+#include <utility>
 #include <vector>
 
 namespace node {
@@ -22,16 +24,19 @@ namespace {
  *  difficulty of about 1,000,000 (2^20), the example threshold in BIP 332. */
 constexpr uint256 TESTNET_MAX_TARGET{"0000000000000fffffffffffffffffffffffffffffffffffffffffffffffffff"};
 
-/** Whether `block` is a header variant of the block at its height on the
- *  branch ending at `branch_tip`: both have the same previous block and merkle
- *  root. A block is a variant of itself. On signet, varying nBits can turn a
- *  valid block into another valid variant, so only one is tracked (see the
- *  "Signet" section of BIP 332). */
-bool IsVariantOnBranch(const CBlockIndex& block, const CBlockIndex& branch_tip)
+/** Whether the headers of two signet blocks settle if they are variants. A
+ *  different previous block, version or time is signed data that differs.
+ *  With the same header merkle root the transactions are the same, so the
+ *  BIP 325 merkle root is too; only unsigned header fields such as nBits can
+ *  differ. A block is a variant of itself.
+ *
+ * @return std::nullopt if the BIP 325 merkle roots must be compared.
+ */
+std::optional<bool> IsHeaderVariant(const CBlockIndex& block, const CBlockIndex& other)
 {
-    if (block.nHeight > branch_tip.nHeight) return false;
-    const CBlockIndex& other{*Assert(branch_tip.GetAncestor(block.nHeight))};
-    return block.pprev == other.pprev && block.hashMerkleRoot == other.hashMerkleRoot;
+    if (block.pprev != other.pprev || block.nVersion != other.nVersion || block.nTime != other.nTime) return false;
+    if (block.hashMerkleRoot == other.hashMerkleRoot) return true;
+    return std::nullopt;
 }
 
 } // namespace
@@ -68,13 +73,78 @@ StaleTipMessage MakeStaleTipMessage(const StaleFork& fork, bool have_block)
 }
 
 StaleTipTracker::StaleTipTracker(ChainType chain_type, int recent_window, size_t max_headers)
-    : m_require_validated_block{chain_type == ChainType::SIGNET},
-      m_dedup_header_variants{chain_type == ChainType::SIGNET},
+    : m_signet{chain_type == ChainType::SIGNET},
       m_recent_window{recent_window},
       m_max_headers{max_headers}
 {
     if (chain_type == ChainType::TESTNET || chain_type == ChainType::TESTNET4) {
         m_max_target = UintToArith256(TESTNET_MAX_TARGET);
+    }
+}
+
+void StaleTipTracker::SetSignetRootReader(SignetRootReader reader)
+{
+    AssertLockHeld(::cs_main);
+    m_read_signet_root = std::move(reader);
+}
+
+std::optional<uint256> StaleTipTracker::GetSignetRoot(const CBlockIndex& block, bool read_blocks)
+{
+    AssertLockHeld(::cs_main);
+    if (const auto cached{std::ranges::find(m_signet_roots, &block, [](const auto& entry) { return entry.first; })}; cached != m_signet_roots.end()) {
+        std::rotate(cached, cached + 1, m_signet_roots.end());
+        return m_signet_roots.back().second;
+    }
+    if (!read_blocks || !m_read_signet_root) return std::nullopt;
+    if (!(block.nStatus & BLOCK_HAVE_DATA) || !block.IsValid(BLOCK_VALID_TRANSACTIONS)) return std::nullopt;
+
+    const auto root{m_read_signet_root(block)};
+    if (!root) return std::nullopt;
+    if (m_signet_roots.size() == MAX_CACHED_SIGNET_ROOTS) m_signet_roots.erase(m_signet_roots.begin());
+    m_signet_roots.emplace_back(&block, *root);
+    return root;
+}
+
+std::optional<bool> StaleTipTracker::IsVariant(const CBlockIndex& block, const CBlockIndex& other, bool read_blocks)
+{
+    AssertLockHeld(::cs_main);
+    if (const auto settled{IsHeaderVariant(block, other)}) return settled;
+    const auto root{GetSignetRoot(block, read_blocks)};
+    if (!root) return std::nullopt;
+    const auto other_root{GetSignetRoot(other, read_blocks)};
+    if (!other_root) return std::nullopt;
+    return *root == *other_root;
+}
+
+std::optional<bool> StaleTipTracker::IsVariantOnBranch(const CBlockIndex& block, const CBlockIndex& branch_tip, bool read_blocks)
+{
+    AssertLockHeld(::cs_main);
+    if (block.nHeight > branch_tip.nHeight) return false;
+    return IsVariant(block, *Assert(branch_tip.GetAncestor(block.nHeight)), read_blocks);
+}
+
+bool StaleTipTracker::IsHiddenByActiveChain(const CChain& active_chain, const TrackedTip& tip) const
+{
+    AssertLockHeld(::cs_main);
+    const CBlockIndex* active_block{active_chain[tip.index->nHeight]};
+    if (active_block == nullptr) return false;
+    if (const auto settled{IsHeaderVariant(*tip.index, *active_block)}) return *settled;
+    return tip.compared_with != active_block || tip.is_variant;
+}
+
+void StaleTipTracker::RefreshSignetVariants(const CChain& active_chain)
+{
+    AssertLockHeld(::cs_main);
+    if (!m_signet) return;
+    for (TrackedTip& tip : m_tips) {
+        if (GetEligibleForkPoint(active_chain, *tip.index) == nullptr) continue;
+        const CBlockIndex* active_block{active_chain[tip.index->nHeight]};
+        if (active_block == nullptr || active_block == tip.compared_with) continue;
+        // If the blocks cannot be read, the tip stays hidden until they can.
+        if (const auto is_variant{IsVariant(*tip.index, *active_block, /*read_blocks=*/true)}) {
+            tip.compared_with = active_block;
+            tip.is_variant = *is_variant;
+        }
     }
 }
 
@@ -85,10 +155,6 @@ const CBlockIndex* StaleTipTracker::GetEligibleForkPoint(const CChain& active_ch
     if (active_chain.Contains(stale_tip)) return nullptr;
     if (IsExpired(active_chain, stale_tip)) return nullptr;
     if (stale_tip.nChainWork > active_tip->nChainWork) return nullptr;
-
-    // Only one variant of a block is tracked, and the active chain's block
-    // counts as seen first, even if it became active later.
-    if (m_dedup_header_variants && IsVariantOnBranch(stale_tip, *active_tip)) return nullptr;
 
     if (m_max_target) {
         arith_uint256 target;
@@ -115,39 +181,40 @@ bool StaleTipTracker::IsExpired(const CChain& active_chain, const CBlockIndex& s
 void StaleTipTracker::PruneExpired(const CChain& active_chain)
 {
     AssertLockHeld(::cs_main);
-    std::erase_if(m_tips, [&](const CBlockIndex* tip) EXCLUSIVE_LOCKS_REQUIRED(::cs_main) {
-        return IsExpired(active_chain, *tip);
+    std::erase_if(m_tips, [&](const TrackedTip& tip) EXCLUSIVE_LOCKS_REQUIRED(::cs_main) {
+        return IsExpired(active_chain, *tip.index);
     });
 }
 
-bool StaleTipTracker::Add(const CBlockIndex& stale_tip)
+bool StaleTipTracker::Add(const CChain& active_chain, const CBlockIndex& stale_tip, bool read_blocks)
 {
     AssertLockHeld(::cs_main);
 
     // Nothing to do if the tip, or one of its descendants, is tracked, or
     // when deduplicating variants, if a tracked branch contains a variant of
-    // the tip.
-    for (const CBlockIndex* tip : m_tips) {
-        if (HasAncestor(*tip, stale_tip)) return false;
-        if (m_dedup_header_variants && IsVariantOnBranch(stale_tip, *tip)) return false;
+    // the tip, or may contain one.
+    for (const TrackedTip& tip : m_tips) {
+        if (HasAncestor(*tip.index, stale_tip)) return false;
+        if (m_signet && IsVariantOnBranch(stale_tip, *tip.index, read_blocks).value_or(true)) return false;
     }
 
     // The tip replaces any tracked ancestors and, when deduplicating variants,
-    // tracked tips that are variants of a block on its branch.
-    std::erase_if(m_tips, [&](const CBlockIndex* tip) {
-        return HasAncestor(stale_tip, *tip) ||
-               (m_dedup_header_variants && IsVariantOnBranch(*tip, stale_tip));
+    // tracked tips that are known to be variants of a block on its branch.
+    std::erase_if(m_tips, [&](const TrackedTip& tip) EXCLUSIVE_LOCKS_REQUIRED(::cs_main) {
+        return HasAncestor(stale_tip, *tip.index) ||
+               (m_signet && IsVariantOnBranch(*tip.index, stale_tip, read_blocks).value_or(false));
     });
 
     if (m_tips.size() == MAX_ADVERTISED_STALETIPS) {
         // Evict the tip with the least work, if it has less than the new
         // tip. min_element returns the first, so the oldest, of equals.
-        const auto evict{std::ranges::min_element(m_tips, {}, [](const CBlockIndex* tip) { return tip->nChainWork; })};
-        if ((*evict)->nChainWork >= stale_tip.nChainWork) return false;
+        const auto evict{std::ranges::min_element(m_tips, {}, [](const TrackedTip& tip) { return tip.index->nChainWork; })};
+        if (evict->index->nChainWork >= stale_tip.nChainWork) return false;
         m_tips.erase(evict);
     }
 
-    m_tips.push_back(&stale_tip);
+    // AddStaleTip() found that the tip is not a variant of the active block.
+    m_tips.push_back({.index = &stale_tip, .compared_with = active_chain[stale_tip.nHeight]});
     return true;
 }
 
@@ -171,21 +238,26 @@ void StaleTipTracker::SeedFromBlockIndex(const node::BlockManager& blockman, con
     for (const CBlockIndex* candidate : candidates) AddStaleTip(active_chain, *candidate);
 }
 
-bool StaleTipTracker::AddStaleTip(const CChain& active_chain, const CBlockIndex& stale_tip)
+bool StaleTipTracker::AddStaleTip(const CChain& active_chain, const CBlockIndex& stale_tip, bool read_blocks)
 {
     AssertLockHeld(::cs_main);
     // Validation is never undone, so this is only checked when a tip is added.
-    if (m_require_validated_block && !stale_tip.IsValid(BLOCK_VALID_TRANSACTIONS)) return false;
+    if (m_signet && !stale_tip.IsValid(BLOCK_VALID_TRANSACTIONS)) return false;
     if (GetEligibleForkPoint(active_chain, stale_tip) == nullptr) return false;
+    // Only one variant of a block is tracked, and the active chain's block
+    // counts as seen first, even if it became active later.
+    if (m_signet && IsVariantOnBranch(stale_tip, *active_chain.Tip(), read_blocks).value_or(true)) return false;
 
     PruneExpired(active_chain);
-    return Add(stale_tip);
+    return Add(active_chain, stale_tip, read_blocks);
 }
 
 bool StaleTipTracker::CanRequestStaleTipBlock(const CChain& active_chain, const CBlockIndex& stale_tip) const
 {
     AssertLockHeld(::cs_main);
-    return GetEligibleForkPoint(active_chain, stale_tip) != nullptr;
+    if (GetEligibleForkPoint(active_chain, stale_tip) == nullptr) return false;
+    const CBlockIndex* active_block{active_chain[stale_tip.nHeight]};
+    return !m_signet || active_block == nullptr || !IsHeaderVariant(stale_tip, *active_block).value_or(false);
 }
 
 bool StaleTipTracker::CanServeStaleBranchBlock(const CChain& active_chain, const CBlockIndex& block) const
@@ -193,12 +265,13 @@ bool StaleTipTracker::CanServeStaleBranchBlock(const CChain& active_chain, const
     AssertLockHeld(::cs_main);
     if (!(block.nStatus & BLOCK_HAVE_DATA)) return false;
 
-    for (const CBlockIndex* tip : m_tips) {
-        if (!(tip->nStatus & BLOCK_HAVE_DATA)) continue;
+    for (const TrackedTip& tip : m_tips) {
+        if (!(tip.index->nStatus & BLOCK_HAVE_DATA)) continue;
 
-        const CBlockIndex* fork_point{GetEligibleForkPoint(active_chain, *tip)};
+        const CBlockIndex* fork_point{GetEligibleForkPoint(active_chain, *tip.index)};
         if (fork_point == nullptr) continue;
-        if (block.nHeight > fork_point->nHeight && HasAncestor(*tip, block)) return true;
+        if (m_signet && IsHiddenByActiveChain(active_chain, tip)) continue;
+        if (block.nHeight > fork_point->nHeight && HasAncestor(*tip.index, block)) return true;
     }
     return false;
 }
@@ -209,10 +282,11 @@ std::vector<StaleFork> StaleTipTracker::GetStaleTips(const CChain& active_chain)
 
     std::vector<StaleFork> tips;
     tips.reserve(m_tips.size());
-    for (const CBlockIndex* tip : m_tips) {
-        const CBlockIndex* fork_point{GetEligibleForkPoint(active_chain, *tip)};
+    for (const TrackedTip& tip : m_tips) {
+        const CBlockIndex* fork_point{GetEligibleForkPoint(active_chain, *tip.index)};
         if (fork_point == nullptr) continue;
-        tips.push_back({.fork_point = fork_point, .tip = tip});
+        if (m_signet && IsHiddenByActiveChain(active_chain, tip)) continue;
+        tips.push_back({.fork_point = fork_point, .tip = tip.index});
     }
 
     return tips;
@@ -221,7 +295,7 @@ std::vector<StaleFork> StaleTipTracker::GetStaleTips(const CChain& active_chain)
 bool StaleTipTracker::IsTracked(const CBlockIndex& tip) const
 {
     AssertLockHeld(::cs_main);
-    return std::ranges::find(m_tips, &tip) != m_tips.end();
+    return std::ranges::find(m_tips, &tip, &TrackedTip::index) != m_tips.end();
 }
 
 } // namespace node

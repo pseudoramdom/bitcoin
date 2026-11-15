@@ -94,6 +94,9 @@ public:
 
     // Responses to chain events. StaleTipRelayManager is not an actual client
     // of ValidationInterface, these are called through PeerManager.
+    /** On signet, compare the tracked tips with the new active chain. This
+     *  reads blocks, so it is not done while answering peers. */
+    void RefreshSignetVariants(const CChain& chain) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
     /** @return Whether a new stale tip is tracked, so it should be relayed. */
     bool BlockDisconnected(const CChain& chain, const CBlockIndex& block) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
     /** @return Whether a new stale tip is tracked, so it should be relayed. */

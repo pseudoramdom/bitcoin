@@ -5,6 +5,8 @@
 #include <node/staletiprelayman.h>
 
 #include <chain.h>
+#include <node/blockstorage.h>
+#include <signet.h>
 #include <util/check.h>
 
 #include <algorithm>
@@ -32,7 +34,20 @@ StaleTipRelayManager::StaleTipRelayManager(const StaleTipRelayOptions& opts)
 void StaleTipRelayManager::Initialize(BlockManager& blockman, const CChain& chain)
 {
     AssertLockHeld(::cs_main);
+    if (m_opts.chain_type == ChainType::SIGNET) {
+        m_tracker.SetSignetRootReader([&blockman](const CBlockIndex& index) EXCLUSIVE_LOCKS_REQUIRED(::cs_main) -> std::optional<uint256> {
+            CBlock block;
+            if (!blockman.ReadBlock(block, index)) return std::nullopt;
+            return ComputeSignetMerkleRoot(block);
+        });
+    }
     m_tracker.SeedFromBlockIndex(blockman, chain);
+}
+
+void StaleTipRelayManager::RefreshSignetVariants(const CChain& chain)
+{
+    AssertLockHeld(::cs_main);
+    m_tracker.RefreshSignetVariants(chain);
 }
 
 bool StaleTipRelayManager::BlockDisconnected(const CChain& chain, const CBlockIndex& block)
@@ -73,7 +88,9 @@ bool StaleTipRelayManager::ReceivedStaleTip(NodeId peer, const CChain& chain, co
         if (from_peer.size() >= MAX_STALETIPS_FROM_PEER) from_peer.pop_front();
         from_peer.push_back({.tip = &tip, .have_block = have_block});
     }
-    return m_tracker.AddStaleTip(chain, tip);
+    // Peer announcements use cached roots only. A tip skipped on a cache miss
+    // is not queued for retry.
+    return m_tracker.AddStaleTip(chain, tip, /*read_blocks=*/false);
 }
 
 bool StaleTipRelayManager::IsAnnouncedStaleBranchBlock(NodeId peer, const CChain& chain, const CBlockIndex& block) const

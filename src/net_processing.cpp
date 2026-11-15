@@ -2482,6 +2482,11 @@ void PeerManagerImpl::UpdatedBlockTip(const CBlockIndex *pindexNew, const CBlock
     // Don't relay inventory during initial block download.
     if (fInitialDownload) return;
 
+    if (m_staletiprelayman && m_chainparams.GetConsensus().signet_blocks) {
+        LOCK(cs_main);
+        m_staletiprelayman->RefreshSignetVariants(m_chainman.ActiveChain());
+    }
+
     // Find the hashes of all blocks that weren't previously in the best chain.
     std::vector<uint256> vHashes;
     const CBlockIndex *pindexToAnnounce = pindexNew;
