@@ -7,6 +7,7 @@
 
 #include <primitives/block.h>
 #include <primitives/transaction.h>
+#include <uint256.h>
 
 #include <optional>
 
@@ -19,6 +20,10 @@ struct Params;
  * Extract signature and check whether a block has a valid solution
  */
 bool CheckSignetBlockSolution(const CBlock& block, const Consensus::Params& consensusParams);
+
+/** Compute the BIP 325 merkle root with the signet solution removed.
+ *  Returns std::nullopt if the witness commitment is missing or the solution cannot be parsed. */
+std::optional<uint256> ComputeSignetMerkleRoot(const CBlock& block);
 
 /**
  * Generate the signet tx corresponding to the given block

@@ -76,6 +76,7 @@ BOOST_AUTO_TEST_CASE(signet_parse_tests)
     CScript challenge{OP_TRUE};
 
     // empty block is invalid
+    BOOST_CHECK(!ComputeSignetMerkleRoot(block));
     BOOST_CHECK(!SignetTxs::Create(block, challenge));
     BOOST_CHECK(!CheckSignetBlockSolution(block, signet_params->GetConsensus()));
 
@@ -84,6 +85,7 @@ BOOST_AUTO_TEST_CASE(signet_parse_tests)
     cb.vout.emplace_back(0, CScript{});
     block.vtx.push_back(MakeTransactionRef(cb));
     block.vtx.push_back(MakeTransactionRef(cb)); // Add dummy tx to exercise merkle root code
+    BOOST_CHECK(!ComputeSignetMerkleRoot(block));
     BOOST_CHECK(!SignetTxs::Create(block, challenge));
     BOOST_CHECK(!CheckSignetBlockSolution(block, signet_params->GetConsensus()));
 
@@ -94,6 +96,7 @@ BOOST_AUTO_TEST_CASE(signet_parse_tests)
     }
     cb.vout.at(0).scriptPubKey = CScript{} << OP_RETURN << witness_commitment_section_141;
     block.vtx.at(0) = MakeTransactionRef(cb);
+    BOOST_CHECK(ComputeSignetMerkleRoot(block) == BlockMerkleRoot(block));
     BOOST_CHECK(SignetTxs::Create(block, challenge));
     BOOST_CHECK(CheckSignetBlockSolution(block, signet_params->GetConsensus()));
 
@@ -101,6 +104,8 @@ BOOST_AUTO_TEST_CASE(signet_parse_tests)
     std::vector<uint8_t> witness_commitment_section_325{0xec, 0xc7, 0xda, 0xa2};
     cb.vout.at(0).scriptPubKey = CScript{} << OP_RETURN << witness_commitment_section_141 << witness_commitment_section_325;
     block.vtx.at(0) = MakeTransactionRef(cb);
+    const uint256 empty_solution_root{BlockMerkleRoot(block)};
+    BOOST_CHECK(ComputeSignetMerkleRoot(block) == empty_solution_root);
     BOOST_CHECK(SignetTxs::Create(block, challenge));
     BOOST_CHECK(CheckSignetBlockSolution(block, signet_params->GetConsensus()));
 
@@ -109,6 +114,7 @@ BOOST_AUTO_TEST_CASE(signet_parse_tests)
     witness_commitment_section_325.push_back(0x51);
     cb.vout.at(0).scriptPubKey = CScript{} << OP_RETURN << witness_commitment_section_141 << witness_commitment_section_325;
     block.vtx.at(0) = MakeTransactionRef(cb);
+    BOOST_CHECK(!ComputeSignetMerkleRoot(block));
     BOOST_CHECK(!SignetTxs::Create(block, challenge));
     BOOST_CHECK(!CheckSignetBlockSolution(block, signet_params->GetConsensus()));
 
@@ -116,13 +122,22 @@ BOOST_AUTO_TEST_CASE(signet_parse_tests)
     witness_commitment_section_325.push_back(0x00);
     cb.vout.at(0).scriptPubKey = CScript{} << OP_RETURN << witness_commitment_section_141 << witness_commitment_section_325;
     block.vtx.at(0) = MakeTransactionRef(cb);
+    BOOST_CHECK(BlockMerkleRoot(block) != empty_solution_root);
+    BOOST_CHECK(ComputeSignetMerkleRoot(block) == empty_solution_root);
     BOOST_CHECK(SignetTxs::Create(block, challenge));
     BOOST_CHECK(CheckSignetBlockSolution(block, signet_params->GetConsensus()));
+
+    CBlock coinbase_only{block};
+    coinbase_only.vtx.pop_back();
+    const auto coinbase_only_root{ComputeSignetMerkleRoot(coinbase_only)};
+    BOOST_REQUIRE(coinbase_only_root);
+    BOOST_CHECK(*coinbase_only_root != empty_solution_root);
 
     // Extraneous data, invalid
     witness_commitment_section_325.push_back(0x00);
     cb.vout.at(0).scriptPubKey = CScript{} << OP_RETURN << witness_commitment_section_141 << witness_commitment_section_325;
     block.vtx.at(0) = MakeTransactionRef(cb);
+    BOOST_CHECK(!ComputeSignetMerkleRoot(block));
     BOOST_CHECK(!SignetTxs::Create(block, challenge));
     BOOST_CHECK(!CheckSignetBlockSolution(block, signet_params->GetConsensus()));
 }

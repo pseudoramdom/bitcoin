@@ -66,23 +66,8 @@ static uint256 ComputeModifiedMerkleRoot(const CMutableTransaction& cb, const CB
     return ComputeMerkleRoot(std::move(leaves));
 }
 
-std::optional<SignetTxs> SignetTxs::Create(const CBlock& block, const CScript& challenge)
+static std::optional<uint256> ComputeSignetMerkleRoot(const CBlock& block, CTxIn& signet_input)
 {
-    CMutableTransaction tx_to_spend;
-    tx_to_spend.version = 0;
-    tx_to_spend.nLockTime = 0;
-    tx_to_spend.vin.emplace_back(COutPoint(), CScript(OP_0), 0);
-    tx_to_spend.vout.emplace_back(0, challenge);
-
-    CMutableTransaction tx_spending;
-    tx_spending.version = 0;
-    tx_spending.nLockTime = 0;
-    tx_spending.vin.emplace_back(COutPoint(), CScript(), 0);
-    tx_spending.vout.emplace_back(0, CScript(OP_RETURN));
-
-    // can't fill any other fields before extracting signet
-    // responses from block coinbase tx
-
     // find and delete signet signature
     if (block.vtx.empty()) return std::nullopt; // no coinbase tx in block; invalid
     CMutableTransaction modified_cb(*block.vtx.at(0));
@@ -100,20 +85,46 @@ std::optional<SignetTxs> SignetTxs::Create(const CBlock& block, const CScript& c
     } else {
         try {
             SpanReader v{signet_solution};
-            v >> tx_spending.vin[0].scriptSig;
-            v >> tx_spending.vin[0].scriptWitness.stack;
+            v >> signet_input.scriptSig;
+            v >> signet_input.scriptWitness.stack;
             if (!v.empty()) return std::nullopt; // extraneous data encountered
         } catch (const std::exception&) {
             return std::nullopt; // parsing error
         }
     }
-    uint256 signet_merkle = ComputeModifiedMerkleRoot(modified_cb, block);
+    return ComputeModifiedMerkleRoot(modified_cb, block);
+}
+
+std::optional<uint256> ComputeSignetMerkleRoot(const CBlock& block)
+{
+    CTxIn signet_input;
+    return ComputeSignetMerkleRoot(block, signet_input);
+}
+
+std::optional<SignetTxs> SignetTxs::Create(const CBlock& block, const CScript& challenge)
+{
+    CMutableTransaction tx_to_spend;
+    tx_to_spend.version = 0;
+    tx_to_spend.nLockTime = 0;
+    tx_to_spend.vin.emplace_back(COutPoint(), CScript(OP_0), 0);
+    tx_to_spend.vout.emplace_back(0, challenge);
+
+    CMutableTransaction tx_spending;
+    tx_spending.version = 0;
+    tx_spending.nLockTime = 0;
+    tx_spending.vin.emplace_back(COutPoint(), CScript(), 0);
+    tx_spending.vout.emplace_back(0, CScript(OP_RETURN));
+
+    // can't fill any other fields before extracting signet
+    // responses from block coinbase tx
+    const auto signet_merkle{ComputeSignetMerkleRoot(block, tx_spending.vin[0])};
+    if (!signet_merkle) return std::nullopt;
 
     std::vector<uint8_t> block_data;
     VectorWriter writer{block_data, 0};
     writer << block.nVersion;
     writer << block.hashPrevBlock;
-    writer << signet_merkle;
+    writer << *signet_merkle;
     writer << block.nTime;
     tx_to_spend.vin[0].scriptSig << block_data;
     tx_spending.vin[0].prevout = COutPoint(tx_to_spend.GetHash(), 0);
