@@ -26,16 +26,18 @@ struct BlockTreeAddOptions {
     uint32_t bits{0x1d00ffff};
     //! Merkle root of the header, or a value unique to the block if unset.
     std::optional<uint256> merkle_root;
+    std::optional<uint32_t> time;
+    int32_t version{4};
 };
 
 /** Build a header on `prev` whose hash is unique for each `nonce`. */
 inline CBlockHeader MakeHeader(const CBlockIndex* prev, uint32_t nonce, const BlockTreeAddOptions& opts)
 {
     CBlockHeader header;
-    header.nVersion = 4;
+    header.nVersion = opts.version;
     header.hashPrevBlock = prev ? prev->GetBlockHash() : uint256::ZERO;
     header.hashMerkleRoot = opts.merkle_root.value_or(uint256{static_cast<uint8_t>(nonce)});
-    header.nTime = 1'700'000'000 + nonce;
+    header.nTime = opts.time.value_or(1'700'000'000 + nonce);
     header.nBits = opts.bits;
     header.nNonce = nonce;
     return header;

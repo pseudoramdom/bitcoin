@@ -5,10 +5,14 @@
 #include <arith_uint256.h>
 #include <chain.h>
 #include <kernel/cs_main.h>
+#include <node/mining_types.h>
 #include <node/staletiptracker.h>
+#include <script/script.h>
 #include <staletipmessage.h>
 #include <test/util/blocktree.h>
+#include <test/util/mining.h>
 #include <test/util/setup_common.h>
+#include <test/util/time.h>
 #include <uint256.h>
 #include <util/check.h>
 #include <validation.h>
@@ -16,6 +20,7 @@
 #include <boost/test/unit_test.hpp>
 
 #include <algorithm>
+#include <memory>
 #include <utility>
 #include <vector>
 
@@ -425,9 +430,8 @@ BOOST_AUTO_TEST_CASE(staletip_tracker_signet_variant_policy)
     for (int i{0}; i < 3; ++i) active = tree.Add(active, /*active=*/true, {.have_data = true});
 
     CBlockIndex* fork{Assert(Assert(active->pprev)->pprev)};
-    const uint256 shared_merkle_root{uint8_t{42}};
-    CBlockIndex* first_variant{tree.Add(fork, /*active=*/false, {.have_data = true, .merkle_root = shared_merkle_root})};
-    CBlockIndex* second_variant{tree.Add(fork, /*active=*/false, {.have_data = true, .merkle_root = shared_merkle_root})};
+    CBlockIndex* first_variant{tree.Add(fork, /*active=*/false, {.have_data = true})};
+    CBlockIndex* second_variant{tree.Add(fork, /*active=*/false, {.have_data = true, .merkle_root = first_variant->hashMerkleRoot, .time = first_variant->nTime})};
 
     StaleTipTracker tips{ChainType::SIGNET};
     BOOST_CHECK(tips.AddStaleTip(tree.active_chain, *first_variant));
@@ -441,8 +445,13 @@ BOOST_AUTO_TEST_CASE(staletip_tracker_signet_variant_policy)
     // The first variant is now a variant of a block on a tracked branch.
     BOOST_CHECK(!tips.AddStaleTip(tree.active_chain, *first_variant));
 
-    CBlockIndex* active_variant{tree.Add(active->pprev, /*active=*/false, {.have_data = true, .merkle_root = active->hashMerkleRoot})};
+    CBlockIndex* active_variant{tree.Add(active->pprev, /*active=*/false, {.have_data = true, .merkle_root = active->hashMerkleRoot, .time = active->nTime})};
     BOOST_CHECK(!tips.AddStaleTip(tree.active_chain, *active_variant));
+    CBlockIndex* different_time{tree.Add(active->pprev, /*active=*/false, {.have_data = true, .merkle_root = active->hashMerkleRoot})};
+    BOOST_CHECK(tips.AddStaleTip(tree.active_chain, *different_time));
+    CBlockIndex* different_version{tree.Add(active->pprev, /*active=*/false,
+        {.have_data = true, .merkle_root = active->hashMerkleRoot, .time = active->nTime, .version = active->nVersion + 1})};
+    BOOST_CHECK(tips.AddStaleTip(tree.active_chain, *different_version));
 
     // Other networks track every variant.
     StaleTipTracker main_tips;
@@ -460,8 +469,7 @@ BOOST_AUTO_TEST_CASE(staletip_tracker_signet_variant_becomes_active)
     for (int i{0}; i < 3; ++i) active = tree.Add(active, /*active=*/true, {.have_data = true});
 
     CBlockIndex* fork{active->pprev};
-    const uint256 shared_merkle_root{uint8_t{42}};
-    CBlockIndex* stale{tree.Add(fork, /*active=*/false, {.have_data = true, .merkle_root = shared_merkle_root})};
+    CBlockIndex* stale{tree.Add(fork, /*active=*/false, {.have_data = true})};
 
     StaleTipTracker tips{ChainType::SIGNET};
     BOOST_CHECK(tips.AddStaleTip(tree.active_chain, *stale));
@@ -469,14 +477,92 @@ BOOST_AUTO_TEST_CASE(staletip_tracker_signet_variant_becomes_active)
 
     // Reorg onto a branch whose block at the tracked tip's height is a
     // variant of it. The tip is no longer eligible, as if it were added now.
-    CBlockIndex* variant{tree.Add(fork, /*active=*/false, {.have_data = true, .merkle_root = shared_merkle_root})};
+    CBlockIndex* variant{tree.Add(fork, /*active=*/false, {.have_data = true, .merkle_root = stale->hashMerkleRoot, .time = stale->nTime})};
     tree.Add(variant, /*active=*/true, {.have_data = true});
     BOOST_CHECK(!tips.AddStaleTip(tree.active_chain, *stale));
     BOOST_CHECK(tips.GetStaleTips(tree.active_chain).empty());
+    BOOST_CHECK(!tips.CanServeStaleBranchBlock(tree.active_chain, *stale));
 
     // It stays tracked, and is eligible again once the variant is reorged out.
     tree.active_chain.SetTip(*active);
     BOOST_CHECK_EQUAL(tips.GetStaleTips(tree.active_chain).size(), 1U);
+}
+
+BOOST_FIXTURE_TEST_CASE(staletip_tracker_signet_distinct_stored_siblings, RegTestingSetup)
+{
+    // These blocks share their parent, version and timestamp. Their different
+    // coinbase payouts also give them different BIP 325 merkle roots.
+    auto active{PrepareBlock(m_node, {.coinbase_output_script = CScript{OP_1}})};
+    auto stale{PrepareBlock(m_node, {.coinbase_output_script = CScript{OP_2}})};
+    auto replacement{PrepareBlock(m_node, {.coinbase_output_script = CScript{OP_3}})};
+    std::vector<std::shared_ptr<CBlock>> other_siblings;
+    for (int i{0}; i < 64; ++i) {
+        auto block{PrepareBlock(m_node, {.coinbase_output_script = CScript{} << (i + 4)})};
+        ++block->nTime; // Comparing these blocks with each other leaves the candidate's cached root unused.
+        other_siblings.push_back(std::move(block));
+    }
+    BOOST_REQUIRE(!MineBlock(m_node, active).IsNull());
+    auto& blockman{m_node.chainman->m_blockman};
+    CChain chain;
+    StaleTipTracker tips{ChainType::SIGNET};
+    {
+        LOCK(::cs_main);
+        chain.SetTip(*Assert(blockman.LookupBlockIndex(active->GetHash())));
+        tips.SeedFromBlockIndex(blockman, chain);
+    }
+    MineBlock(m_node, stale);
+    MineBlock(m_node, replacement);
+    for (auto& block : other_siblings) MineBlock(m_node, block);
+
+    LOCK(::cs_main);
+    CBlockIndex& candidate{*Assert(blockman.LookupBlockIndex(stale->GetHash()))};
+    CBlockIndex& new_active{*Assert(blockman.LookupBlockIndex(replacement->GetHash()))};
+    BOOST_REQUIRE(candidate.pprev == chain.Tip()->pprev && candidate.pprev == new_active.pprev);
+    BOOST_REQUIRE(candidate.nVersion == chain.Tip()->nVersion && candidate.nVersion == new_active.nVersion);
+    BOOST_REQUIRE(candidate.nTime == chain.Tip()->nTime && candidate.nTime == new_active.nTime);
+    BOOST_REQUIRE(candidate.hashMerkleRoot != chain.Tip()->hashMerkleRoot && candidate.hashMerkleRoot != new_active.hashMerkleRoot);
+    BOOST_REQUIRE(candidate.nStatus & BLOCK_HAVE_DATA);
+    BOOST_REQUIRE(new_active.nStatus & BLOCK_HAVE_DATA);
+
+    // Blocks are not read for a tip that a peer announced.
+    BOOST_CHECK(tips.CanRequestStaleTipBlock(chain, candidate));
+    BOOST_CHECK(!tips.AddStaleTipFromPeer(chain, candidate));
+
+    // Point at the wrong block on disk to exercise the retry delay for a failed read.
+    FakeSteadyClock clock;
+    const auto pos{std::exchange(candidate.nDataPos, chain.Tip()->nDataPos)};
+    BOOST_CHECK(!tips.AddStaleTip(chain, candidate));
+    candidate.nDataPos = pos;
+    BOOST_CHECK(!tips.AddStaleTip(chain, candidate));
+    clock += 1min;
+    BOOST_REQUIRE(tips.AddStaleTip(chain, candidate));
+
+    chain.SetTip(new_active);
+    // The headers don't settle it, so the tip is withheld until it has been
+    // compared with the newly active block.
+    new_active.nStatus &= ~BLOCK_HAVE_DATA;
+    BOOST_CHECK(tips.GetStaleTips(chain).empty());
+    BOOST_CHECK(!tips.CanServeStaleBranchBlock(chain, candidate));
+    new_active.nStatus |= BLOCK_HAVE_DATA;
+    candidate.nStatus &= ~BLOCK_HAVE_DATA;
+    BOOST_REQUIRE_EQUAL(tips.GetStaleTips(chain).size(), 1U); // The candidate's cached root suffices.
+    candidate.nStatus |= BLOCK_HAVE_DATA;
+    BOOST_CHECK(tips.CanServeStaleBranchBlock(chain, candidate));
+    const auto forks{tips.GetStaleTips(chain)};
+    BOOST_REQUIRE_EQUAL(forks.size(), 1U);
+    BOOST_CHECK_EQUAL(forks.front().tip, &candidate);
+
+    for (const auto& block : other_siblings) {
+        tips.AddStaleTip(chain, *Assert(blockman.LookupBlockIndex(block->GetHash())));
+    }
+    candidate.nStatus &= ~BLOCK_HAVE_DATA;
+    // The tracked tip's root was evicted, but its comparison with the active
+    // block remains known. A different active sibling requires a fresh comparison.
+    BOOST_CHECK_EQUAL(std::ranges::count(tips.GetStaleTips(chain), &candidate, &StaleFork::tip), 1);
+    chain.SetTip(*Assert(blockman.LookupBlockIndex(active->GetHash())));
+    BOOST_CHECK_EQUAL(std::ranges::count(tips.GetStaleTips(chain), &candidate, &StaleFork::tip), 0);
+    candidate.nStatus |= BLOCK_HAVE_DATA;
+    BOOST_CHECK(tips.CanServeStaleBranchBlock(chain, candidate));
 }
 
 /** A BlockManager whose block index holds an active chain of five blocks,
@@ -492,7 +578,7 @@ struct SeedFromBlockIndexSetup : public ChainTestingSetup {
     {
         LOCK(::cs_main);
         for (int i{0}; i < 5; ++i) {
-            active = Add(active);
+            active = Add(active, {.have_data = true});
             active_chain.SetTip(*active);
         }
     }
@@ -564,7 +650,7 @@ BOOST_FIXTURE_TEST_CASE(staletip_seed_signet_skips_active_tip_variant, SeedFromB
 {
     LOCK(::cs_main);
 
-    const CBlockIndex* active_variant{Add(active->pprev, {.have_data = true, .merkle_root = active->hashMerkleRoot})};
+    const CBlockIndex* active_variant{Add(active->pprev, {.have_data = true, .merkle_root = active->hashMerkleRoot, .time = active->nTime})};
 
     StaleTipTracker signet_tracker{ChainType::SIGNET};
     BOOST_CHECK(Seed(signet_tracker).empty());

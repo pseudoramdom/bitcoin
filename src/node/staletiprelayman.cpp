@@ -73,7 +73,7 @@ bool StaleTipRelayManager::ReceivedStaleTip(NodeId peer, const CChain& chain, co
         if (from_peer.size() >= MAX_STALETIPS_FROM_PEER) from_peer.pop_front();
         from_peer.push_back({.tip = &tip, .have_block = have_block});
     }
-    return m_tracker.AddStaleTip(chain, tip);
+    return m_tracker.AddStaleTipFromPeer(chain, tip);
 }
 
 bool StaleTipRelayManager::IsAnnouncedStaleBranchBlock(NodeId peer, const CChain& chain, const CBlockIndex& block) const
